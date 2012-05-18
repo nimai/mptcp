@@ -230,8 +230,8 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	struct inet_connection_sock *meta_icsk = inet_csk(meta_sk);
 
-	if (unlikely(meta_tp->send_mp_rst))
-		goto send_mp_rst;
+	if (unlikely(meta_tp->send_mp_fclose))
+		goto send_mp_fclose;
 
 	/* In fallback, retransmission is handled at the subflow-level */
 	if (!meta_tp->packets_out ||
@@ -254,7 +254,7 @@ out:
 
 	return;
 
-send_mp_rst:
+send_mp_fclose:
 	mptcp_send_active_reset(meta_sk, GFP_ATOMIC);
 
 	goto out;
@@ -481,14 +481,6 @@ int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	int result;
 	int reinject = 0;
 
-	if (unlikely(meta_sk->sk_in_write_xmit)) {
-		printk(KERN_ERR "sk in write xmit, meta_sk: %d\n",
-		       is_meta_sk(meta_sk));
-		BUG();
-	}
-
-	meta_sk->sk_in_write_xmit = 1;
-
 	if (mss_now != mptcp_sysctl_mss()) {
 		printk(KERN_ERR "write xmit-mss_now %d, mptcp mss:%d\n",
 		       mss_now, mptcp_sysctl_mss());
@@ -498,10 +490,8 @@ int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	 * In time closedown will finish, we empty the write queue and all
 	 * will be happy.
 	 */
-	if (unlikely(meta_sk->sk_state == TCP_CLOSE)) {
-		meta_sk->sk_in_write_xmit = 0;
+	if (unlikely(meta_sk->sk_state == TCP_CLOSE))
 		return 0;
-	}
 
 	sent_pkts = 0;
 
@@ -509,7 +499,6 @@ int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		/* Do MTU probing. */
 		result = tcp_mtu_probe(meta_sk);
 		if (!result) {
-			meta_sk->sk_in_write_xmit = 0;
 			return 0;
 		} else if (result > 0) {
 			sent_pkts = 1;
@@ -579,8 +568,6 @@ retry:
 						      nonagle : TCP_NAGLE_PUSH))))
 				break;
 		} else {
-			/* tso not supported in MPTCP */
-			BUG();
 			if (!push_one && tcp_tso_should_defer(meta_sk, skb))
 				break;
 		}
@@ -728,11 +715,9 @@ retry:
 
 	mpcb->noneligible = 0;
 
-	if (likely(sent_pkts)) {
-		meta_sk->sk_in_write_xmit = 0;
+	if (likely(sent_pkts))
 		return 0;
-	}
-	meta_sk->sk_in_write_xmit = 0;
+
 	return !meta_tp->packets_out && tcp_send_head(meta_sk);
 }
 
@@ -940,11 +925,11 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		return;
 	}
 
-	if (unlikely(tp->send_mp_rst)) {
+	if (unlikely(tp->send_mp_fclose)) {
 		opts->options |= OPTION_MPTCP;
-		opts->mptcp_options |= OPTION_MP_RST;
+		opts->mptcp_options |= OPTION_MP_FCLOSE;
 		opts->receiver_key = mpcb->rx_opt.mptcp_rem_key;
-		*size += MPTCP_SUB_LEN_RST_ALIGN;
+		*size += MPTCP_SUB_LEN_FCLOSE_ALIGN;
 		return;
 	}
 
@@ -1210,17 +1195,17 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 
 		ptr += MPTCP_SUB_LEN_FAIL_ALIGN >> 2;
 	}
-	if (unlikely(OPTION_MP_RST & opts->mptcp_options)) {
-		struct mp_rst *mprst = (struct mp_rst *) ptr;
+	if (unlikely(OPTION_MP_FCLOSE & opts->mptcp_options)) {
+		struct mp_fclose *mpfclose = (struct mp_fclose *) ptr;
 
-		mprst->kind = TCPOPT_MPTCP;
-		mprst->len = MPTCP_SUB_LEN_RST;
-		mprst->sub = MPTCP_SUB_RST;
-		mprst->rsv1 = 0;
-		mprst->rsv2 = 0;
-		mprst->key = opts->receiver_key;
+		mpfclose->kind = TCPOPT_MPTCP;
+		mpfclose->len = MPTCP_SUB_LEN_FCLOSE;
+		mpfclose->sub = MPTCP_SUB_FCLOSE;
+		mpfclose->rsv1 = 0;
+		mpfclose->rsv2 = 0;
+		mpfclose->key = opts->receiver_key;
 
-		ptr += MPTCP_SUB_LEN_RST_ALIGN >> 2;
+		ptr += MPTCP_SUB_LEN_FCLOSE_ALIGN >> 2;
 	}
 
 	if (OPTION_DSN_MAP & opts->mptcp_options ||
@@ -1361,10 +1346,10 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 		return;
 
 	/* First - select a socket */
-	if (!mptcp_test_any_sk(mpcb, sk_it, tcp_sk(sk_it)->send_mp_rst)) {
+	if (!mptcp_test_any_sk(mpcb, sk_it, tcp_sk(sk_it)->send_mp_fclose)) {
 		sk = mptcp_select_ack_sock(mpcb, 0);
 
-		tcp_sk(sk)->send_mp_rst = 1;
+		tcp_sk(sk)->send_mp_fclose = 1;
 	}
 
 	/** Reset all other subflows */
@@ -1373,7 +1358,7 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 	if (!in_serving_softirq())
 		local_bh_disable();
 	mptcp_for_each_sk_safe(mpcb, sk_it, sk_tmp) {
-		if (tcp_sk(sk_it)->send_mp_rst) {
+		if (tcp_sk(sk_it)->send_mp_fclose) {
 			sk = sk_it;
 			continue;
 		}
@@ -1386,7 +1371,7 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 
 	tcp_send_ack(sk);
 
-	if (!mpcb_meta_tp(mpcb)->send_mp_rst) {
+	if (!mpcb_meta_tp(mpcb)->send_mp_fclose) {
 		struct inet_connection_sock *meta_icsk = inet_csk(meta_sk);
 
 		meta_icsk->icsk_rto = min(inet_csk(sk)->icsk_rto, TCP_RTO_MAX);
@@ -1394,7 +1379,7 @@ void mptcp_send_active_reset(struct sock *meta_sk, gfp_t priority)
 					  meta_icsk->icsk_rto, TCP_RTO_MAX);
 	}
 
-	mpcb_meta_tp(mpcb)->send_mp_rst = 1;
+	mpcb_meta_tp(mpcb)->send_mp_fclose = 1;
 }
 
 void mptcp_send_reset(struct sock *sk, struct sk_buff *skb)
