@@ -604,7 +604,6 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 		__be32 opt[(TCPOLEN_MD5SIG_ALIGNED >> 2)];
 #endif
 #ifdef CONFIG_MPTCP
-		__u8 fail_opt[2];
 		struct mp_fail mpfail;
 #endif
 	} rep;
@@ -659,8 +658,8 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 #ifdef CONFIG_MPTCP
 	if (sk && tcp_sk(sk)->csum_error) {
 		/* We had a checksum-error? -> Include MP_FAIL */
-		rep.fail_opt[0] = TCPOPT_MPTCP;
-		rep.fail_opt[1] = MPTCP_SUB_LEN_FAIL;
+		rep.mpfail.kind = TCPOPT_MPTCP;
+		rep.mpfail.len = MPTCP_SUB_LEN_FAIL;
 		rep.mpfail.sub = MPTCP_SUB_FAIL;
 		rep.mpfail.rsv1 = 0;
 		rep.mpfail.rsv2 = 0;
@@ -792,9 +791,15 @@ static void tcp_v4_timewait_ack(struct sock *sk, struct sk_buff *skb)
 {
 	struct inet_timewait_sock *tw = inet_twsk(sk);
 	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
+	u32 data_ack = 0;
 
+	if (mptcp_is_data_fin(skb)) {
+		/* As it's a data-fin we know that the data-seq is present */
+		mptcp_skb_set_data_seq(skb, &data_ack);
+		data_ack++;
+	}
 	tcp_v4_send_ack(skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
-			mptcp_skb_data_seq(skb) + 1,
+			data_ack,
 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
 			tcptw->tw_ts_recent,
 			tw->tw_bound_dev_if,
@@ -1763,8 +1768,6 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
 #ifdef CONFIG_MPTCP
 	/* Init to zero, will be set upon option parsing. */
-	TCP_SKB_CB(skb)->data_seq = 0;
-	TCP_SKB_CB(skb)->end_data_seq = 0;
 	TCP_SKB_CB(skb)->mptcp_flags = 0;
 	TCP_SKB_CB(skb)->dss_off = 0;
 #endif

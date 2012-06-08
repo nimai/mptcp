@@ -612,11 +612,17 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
 	ssize_t spliced;
 	int ret;
 
-#ifdef CONFIG_MPTCP
-	printk(KERN_ERR "%s not supported yet\n", __func__);
-	BUG();
-#endif
 	sock_rps_record_flow(sk);
+
+#ifdef CONFIG_MPTCP
+	if (tcp_sk(sk)->mpc) {
+		struct sock *sk_it;
+		mptcp_for_each_sk(tcp_sk(sk)->mpcb, sk_it) {
+			if (!is_master_tp(tcp_sk(sk_it)))
+				sock_rps_record_flow(sk_it);
+		}
+	}
+#endif
 	/*
 	 * We can't seek on a socket input
 	 */
@@ -626,6 +632,24 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
 	ret = spliced = 0;
 
 	lock_sock(sk);
+
+#ifdef CONFIG_MPTCP
+	/* Wait for the mptcp connection to establish. */
+	if (tcp_sk(sk)->request_mptcp && !is_meta_sk(sk) &&
+	    ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))) {
+		int err;
+		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0) {
+			release_sock(sk);
+			return err;
+		}
+
+		if (tcp_sk(sk)->mpc && !is_meta_sk(sk)) {
+			release_sock(sk);
+			mptcp_update_pointers(&sk, NULL, NULL);
+			lock_sock(sk);
+		}
+	}
+#endif
 
 	timeo = sock_rcvtimeo(sk, sock->file->f_flags & O_NONBLOCK);
 	while (tss.len) {
@@ -1122,8 +1146,6 @@ new_segment:
 			TCP_SKB_CB(skb)->end_seq += copy;
 			skb_shinfo(skb)->gso_segs = 0;
 
-			mptcp_set_data_size(tp, skb, copy);
-
 			from += copy;
 			copied += copy;
 			if ((seglen -= copy) == 0 && iovlen == 0)
@@ -1409,10 +1431,13 @@ static inline struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
 	u32 offset;
 
 	skb_queue_walk(&sk->sk_receive_queue, skb) {
+
 		offset = seq - TCP_SKB_CB(skb)->seq;
+
 		if (tcp_hdr(skb)->syn)
 			offset--;
-		if (offset < skb->len || tcp_hdr(skb)->fin) {
+		if (offset < skb->len || (!tcp_sk(sk)->mpc && tcp_hdr(skb)->fin) ||
+		    (tcp_sk(sk)->mpc && mptcp_is_data_fin(skb))) {
 			*off = offset;
 			return skb;
 		}
@@ -1439,11 +1464,6 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 	u32 seq = tp->copied_seq;
 	u32 offset;
 	int copied = 0;
-
-	if (tp->mpc) {
-		printk(KERN_ERR "tcp_read_sock primitive not yet supported\n");
-		BUG();
-	}
 
 	if (sk->sk_state == TCP_LISTEN)
 		return -ENOTCONN;
@@ -1481,7 +1501,8 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 			if (!skb || (offset+1 != skb->len))
 				break;
 		}
-		if (tcp_hdr(skb)->fin) {
+		if ((!tp->mpc && tcp_hdr(skb)->fin) ||
+		    (tp->mpc && mptcp_is_data_fin(skb))) {
 			sk_eat_skb(sk, skb, 0);
 			++seq;
 			break;
@@ -1493,11 +1514,23 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 	}
 	tp->copied_seq = seq;
 
-	tcp_rcv_space_adjust(sk);
+	if (tp->mpc) {
+		struct sock *sk_it;
+
+		mptcp_for_each_sk(tp->mpcb, sk_it)
+			tcp_rcv_space_adjust(sk_it);
+	} else {
+		tcp_rcv_space_adjust(sk);
+	}
 
 	/* Clean up data we have read: This will do ACK frames. */
-	if (copied > 0)
-		tcp_cleanup_rbuf(sk, copied);
+	if (copied > 0) {
+		if (tp->mpc)
+			mptcp_cleanup_rbuf(sk, copied);
+		else
+			tcp_cleanup_rbuf(sk, copied);
+	}
+
 	return copied;
 }
 EXPORT_SYMBOL(tcp_read_sock);
@@ -1614,22 +1647,13 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 			/* Now that we have two receive queues this
 			 * shouldn't happen.
 			 */
-			if (!mpcb && WARN(before(*seq, TCP_SKB_CB(skb)->seq),
+			if (WARN(before(*seq, TCP_SKB_CB(skb)->seq),
 				 "recvmsg bug: copied %X seq %X rcvnxt %X fl %X\n",
 				 *seq, TCP_SKB_CB(skb)->seq, tp->rcv_nxt,
 				 flags))
 				break;
 
-			if (mpcb && WARN(before(*seq, mptcp_skb_data_seq(skb)),
-				 "recvmsg bug: copied %X seq %X rcvnxt %X fl %X\n",
-				 *seq, mptcp_skb_data_seq(skb), tp->rcv_nxt,
-				 flags))
-				break;
-
-			if (!mpcb)
-				offset = *seq - TCP_SKB_CB(skb)->seq;
-			else
-				offset = *seq - mptcp_skb_data_seq(skb);
+			offset = *seq - TCP_SKB_CB(skb)->seq;
 
 			if (tcp_hdr(skb)->syn)
 				offset--;

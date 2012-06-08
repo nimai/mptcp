@@ -3504,14 +3504,9 @@ static void tcp_ack_probe(struct sock *sk)
 	int usable_wopen;
 
 	/* Was it a usable window open? */
-	if (tp->mpc)
-		usable_wopen = (!after(
-				mptcp_skb_end_data_seq(tcp_send_head(sk)),
-				tcp_wnd_end(tp, 1)));
-	else
-		usable_wopen=(!after(TCP_SKB_CB(
+	usable_wopen=(!after(TCP_SKB_CB(
 				tcp_send_head(sk))->end_seq,
-				tcp_wnd_end(tp,0)));
+				tcp_wnd_end(tp)));
 
 	if (usable_wopen) {
 		icsk->icsk_backoff = 0;
@@ -3771,19 +3766,16 @@ static int tcp_ack(struct sock *sk, struct sk_buff *skb, int flag)
 	prior_in_flight = tcp_packets_in_flight(tp);
 
 	if (!(flag & FLAG_SLOWPATH) && after(ack, prior_snd_una)) {
-		struct tcp_sock *meta_tp = (tp->mpc) ?
-				mpcb_meta_tp(tp->mpcb) : tp;
+		if (tp->mpc) {
+			mptcp_debug("%s FAST_PATH is not enabled for MPTCP!!!\n", __func__);
+			BUG();
+		}
 		/* Window is constant, pure forward advance.
 		 * No more checks are required.
 		 * Note, we use the fact that SND.UNA>=SND.WL2.
 		 */
-		tcp_update_wl(meta_tp, (tp->mpc) ? mptcp_skb_data_seq(skb) :
-			      ack_seq);
+		tcp_update_wl(tp, ack_seq);
 		tp->snd_una = ack;
-#ifdef CONFIG_MPTCP
-		if (tp->mpc && after(tp->snd_una, tp->reinjected_seq))
-			tp->reinjected_seq = tp->snd_una;
-#endif
 		flag |= FLAG_WIN_UPDATE;
 
 		tcp_ca_event(sk, CA_EVENT_FAST_ACK);
@@ -4140,9 +4132,6 @@ static int tcp_disordered_ack(const struct sock *sk, const struct sk_buff *skb)
 	const struct tcphdr *th = tcp_hdr(skb);
 	u32 seq = TCP_SKB_CB(skb)->seq;
 	u32 ack = TCP_SKB_CB(skb)->ack_seq;
-	const struct tcp_sock *meta_tp = (tp->mpc) ? mpcb_meta_tp(tp->mpcb) : tp;
-	u32 data_ack = (tp->mpc) ? mptcp_skb_data_ack(skb) : ack;
-	u32 data_seq = (tp->mpc) ? mptcp_skb_data_seq(skb) : seq;
 
 	return (/* 1. Pure ACK with correct sequence number. */
 		(th->ack && seq == TCP_SKB_CB(skb)->end_seq && seq == tp->rcv_nxt) &&
@@ -4151,7 +4140,7 @@ static int tcp_disordered_ack(const struct sock *sk, const struct sk_buff *skb)
 		ack == tp->snd_una &&
 
 		/* 3. ... and does not update window. */
-		!tcp_may_update_window(meta_tp, data_ack, data_seq,
+		!tcp_may_update_window(tp, ack, seq,
 				ntohs(th->window) << tp->rx_opt.snd_wscale) &&
 
 		/* 4. ... and sits in replay window. */
@@ -4510,8 +4499,6 @@ static void tcp_ofo_queue(struct sock *sk)
 
 		if (!tp->mpc)
 			tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
-		else if (before(tp->rcv_nxt, TCP_SKB_CB(skb)->end_seq))
-			tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 
 		if (tcp_hdr(skb)->fin)
 			tcp_fin(sk);
@@ -4524,7 +4511,7 @@ static void tcp_ofo_queue(struct sock *sk)
 static inline int tcp_try_rmem_schedule(struct sock *sk, unsigned int size)
 {
 	if (tcp_sk(sk)->mpc)
-		return mptcp_try_rmem_schedule(sk, size);
+		sk = mptcp_meta_sk(sk);
 
 	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
 	    !sk_rmem_schedule(sk, size)) {
@@ -4628,7 +4615,8 @@ queue_and_out:
 				__skb_queue_tail(&sk->sk_receive_queue, skb);
 			}
 		}
-		if (!tp->mpc || before(tp->rcv_nxt, TCP_SKB_CB(skb)->end_seq))
+
+		if (!tp->mpc)
 			tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
 
 		if (skb->len)
@@ -4794,7 +4782,6 @@ add_sack:
 	}
 }
 
-#ifndef CONFIG_MPTCP
 static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
 					struct sk_buff_head *list)
 {
@@ -4809,7 +4796,6 @@ static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
 
 	return next;
 }
-#endif
 
 /* Collapse contiguous sequence of skbs head..tail with
  * sequence numbers start..end.
@@ -4826,7 +4812,6 @@ static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
  * NOTE that when supporting this, we will need to ensure that the path_index
  * field is copied when creating the new skbuff.
  */
-#ifndef CONFIG_MPTCP
 static void
 tcp_collapse(struct sock *sk, struct sk_buff_head *list,
 	     struct sk_buff *head, struct sk_buff *tail,
@@ -4929,12 +4914,10 @@ restart:
 		}
 	}
 }
-#endif
 
 /* Collapse ofo queue. Algorithm: select contiguous sequence of skbs
  * and tcp_collapse() them until all the queue is collapsed.
  */
-#ifndef CONFIG_MPTCP
 static void tcp_collapse_ofo_queue(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -4942,7 +4925,10 @@ static void tcp_collapse_ofo_queue(struct sock *sk)
 	struct sk_buff *head;
 	u32 start, end;
 
-	if (skb == NULL)
+	/* TODO - we can adapt this here for MPTCP at the subflow level but
+	 * also at the meta-level.
+	 */
+	if (skb == NULL || tp->mpc)
 		return;
 
 	start = TCP_SKB_CB(skb)->seq;
@@ -4977,7 +4963,6 @@ static void tcp_collapse_ofo_queue(struct sock *sk)
 		}
 	}
 }
-#endif
 
 /*
  * Purge the out-of-order queue.
@@ -4987,6 +4972,13 @@ int tcp_prune_ofo_queue(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	int res = 0;
+
+	/* TODO - adapt for MPTCP - here we return 0, because there are other
+	 * places that should be first optimized. Then, we can start pruning
+	 * the ofo-queue.
+	 */
+	if (tp->mpc)
+		return 0;
 
 	if (!skb_queue_empty(&tp->out_of_order_queue)) {
 		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_OFOPRUNED);
@@ -5016,6 +5008,12 @@ int tcp_prune_queue(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 
+	/* TODO - we can adapt this here for MPTCP on the subflow-level
+	 * but also at the meta-level.
+	 */
+	if (tp->mpc)
+		return -1;
+
 	SOCK_DEBUG(sk, "prune_queue: c=%x\n", tp->copied_seq);
 
 	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_PRUNECALLED);
@@ -5025,15 +5023,13 @@ int tcp_prune_queue(struct sock *sk)
 	else if (tcp_memory_pressure)
 		tp->rcv_ssthresh = min(tp->rcv_ssthresh, 4U * tp->advmss);
 
-#ifndef CONFIG_MPTCP
 	tcp_collapse_ofo_queue(sk);
 	if (!skb_queue_empty(&sk->sk_receive_queue))
 		tcp_collapse(sk, &sk->sk_receive_queue,
 			     skb_peek(&sk->sk_receive_queue),
 			     NULL,
 			     tp->copied_seq, tp->rcv_nxt);
-#endif
-	mptcp_update_window_clamp(tp);
+
 	sk_mem_reclaim(sk);
 
 	if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf)
@@ -5101,14 +5097,45 @@ static int tcp_should_expand_sndbuf(const struct sock *sk)
 	if (atomic_long_read(&tcp_memory_allocated) >= sysctl_tcp_mem[0])
 		return 0;
 
-	/* If we filled the congestion window, do not expand.
-	 * MPTCP note: at the moment, we do not take this case into account.
-	 * In the future, if we want to do so, we'll need to maintain
-	 * packet_out counter at the meta_tp level, as well as maintain a
-	 * meta_tp->snd_cwnd = sum(sub_tp->snd_cwnd)
-	 */
+	/* If we filled the congestion window, do not expand. */
 	if (!tp->mpc && tp->packets_out >= tp->snd_cwnd)
 		return 0;
+
+#ifdef CONFIG_MPTCP
+	if (tp->mpc) {
+		struct sock *sk_it;
+		int cnt_backups = 0;
+		int backup_available = 0;
+
+		/* For MPTCP we look for a subsocket that could send data.
+		 * If we found one, then we update the send-buffer.
+		 */
+		mptcp_for_each_sk(tp->mpcb, sk_it) {
+			struct tcp_sock *tp_it = tcp_sk(sk_it);
+
+			/* Backup-flows have to be counted - if there is no other
+			 * subflow we take the backup-flow into account. */
+			if (tp_it->rx_opt.low_prio || tp_it->low_prio) {
+				cnt_backups++;
+			}
+			if (!mptcp_sk_can_send(sk_it))
+				continue;
+
+			if (tp_it->packets_out < tp_it->snd_cwnd) {
+				if (tp_it->rx_opt.low_prio || tp_it->low_prio) {
+					backup_available = 1;
+					continue;
+				}
+				return 1;
+			}
+		}
+
+		/* Backup-flow is available for sending - update send-buffer */
+		if (cnt_backups == tp->mpcb->cnt_subflows && backup_available)
+			return 1;
+		return 0;
+	}
+#endif
 
 	return 1;
 }
@@ -5153,7 +5180,7 @@ static void tcp_new_space(struct sock *sk)
 		tp->snd_cwnd_stamp = tcp_time_stamp;
 	}
 
-	sk->sk_write_space(meta_sk);
+	meta_sk->sk_write_space(meta_sk);
 }
 
 
@@ -5843,7 +5870,8 @@ cont_mptcp:
 		TCP_ECN_rcv_synack(tp, th);
 
 		if (tp->mpc)
-			mpcb_meta_tp(mpcb)->snd_wl1 = mptcp_skb_data_seq(skb);
+			/* -1 because rcv_nxt is not the data-seq number of the SYN/ACK */
+			mpcb_meta_tp(mpcb)->snd_wl1 = mpcb_meta_tp(mpcb)->rcv_nxt - 1;
 		else
 			tp->snd_wl1 = TCP_SKB_CB(skb)->seq;
 		tcp_ack(sk, skb, FLAG_SLOWPATH);

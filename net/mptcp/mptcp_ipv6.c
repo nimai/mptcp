@@ -541,7 +541,7 @@ void mptcp_pm_addr6_event_handler(struct inet6_ifaddr *ifa, unsigned long event,
 
 	/* Not yet in address-list */
 	if (event == NETDEV_UP && netif_running(ifa->idev->dev)) {
-		i = __mptcp_find_free_index(mpcb->loc6_bits, 0);
+		i = __mptcp_find_free_index(mpcb->loc6_bits, 0, mpcb->next_v6_index);
 		if (i < 0) {
 			printk(KERN_DEBUG "MPTCP_PM: NETDEV_UP Reached max "
 					"number of local IPv6 addresses: %d\n",
@@ -557,6 +557,7 @@ void mptcp_pm_addr6_event_handler(struct inet6_ifaddr *ifa, unsigned long event,
 		ipv6_addr_copy(&mpcb->addr6[i].addr, &ifa->addr);
 		mpcb->addr6[i].id = i + MPTCP_MAX_ADDR;
 		mpcb->loc6_bits |= (1 << i);
+		mpcb->next_v6_index = i + 1;
 		/* re-send addresses */
 		mptcp_v6_send_add_addr(i, mpcb);
 		/* re-evaluate paths */
@@ -595,20 +596,11 @@ found:
 	if (event == NETDEV_DOWN) {
 		mpcb->loc6_bits &= ~(1 << i);
 
-		/* force sending an ACK on each subflow */
+		/* Force sending directly the REMOVE_ADDR option */
 		mpcb->remove_addrs |= (1 << mpcb->addr6[i].id);
-		mptcp_for_each_sk(mpcb, sk) {
-			if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_CLOSE |
-						   TCPF_TIME_WAIT))
-				continue;
-
-			if (tcp_sk(sk)->pf == 1)
-				continue;
-
-			if (inet_sk(sk)->loc_id != mpcb->addr6[i].id)
-				tcp_send_ack(sk);
-		}
-		mpcb->remove_addrs = 0;
+		sk = mptcp_select_ack_sock(mpcb, 0);
+		if (sk)
+			tcp_send_ack(sk);
 
 		mptcp_for_each_bit_set(mpcb->rx_opt.rem6_bits, i)
 			mpcb->rx_opt.addr6[i].bitfield &= mpcb->loc6_bits;

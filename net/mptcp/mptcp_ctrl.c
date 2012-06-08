@@ -52,7 +52,7 @@
 #include <linux/sysctl.h>
 #endif
 
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 #define AF_INET_FAMILY(fam) ((fam) == AF_INET)
 #define AF_INET6_FAMILY(fam) ((fam) == AF_INET6)
 #else
@@ -70,6 +70,8 @@ int sysctl_mptcp_mss __read_mostly = MPTCP_MSS;
 int sysctl_mptcp_ndiffports __read_mostly = 1;
 int sysctl_mptcp_enabled __read_mostly = 1;
 int sysctl_mptcp_checksum __read_mostly = 1;
+int sysctl_mptcp_debug __read_mostly = 0;
+EXPORT_SYMBOL(sysctl_mptcp_debug);
 
 static ctl_table mptcp_table[] = {
 	{
@@ -96,6 +98,13 @@ static ctl_table mptcp_table[] = {
 	{
 		.procname = "mptcp_checksum",
 		.data = &sysctl_mptcp_checksum,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec
+	},
+	{
+		.procname = "mptcp_debug",
+		.data = &sysctl_mptcp_debug,
 		.maxlen = sizeof(int),
 		.mode = 0644,
 		.proc_handler = &proc_dointvec
@@ -385,13 +394,9 @@ int mptcp_alloc_mpcb(struct sock *master_sk)
 	memset(mpcb, 0, sizeof(struct mptcp_cb));
 
 	/* meta_sk inherits master sk */
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 	mptcp_inherit_sk(master_sk, meta_sk, AF_INET6, GFP_ATOMIC);
-#else
-	mptcp_inherit_sk(master_sk, meta_sk, AF_INET, GFP_ATOMIC);
-#endif /* CONFIG_IPV6 || CONFIG_IPV6_MODULE */
 
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	if (AF_INET_FAMILY(master_sk->sk_family)) {
 		mpcb->icsk_af_ops_alt = &ipv6_specific;
 		mpcb->sk_prot_alt = &tcpv6_prot;
@@ -399,7 +404,9 @@ int mptcp_alloc_mpcb(struct sock *master_sk)
 		mpcb->icsk_af_ops_alt = &ipv4_specific;
 		mpcb->sk_prot_alt = &tcp_prot;
 	}
-#endif /* CONFIG_IPV6 || CONFIG_IPV6_MODULE */
+#else
+	mptcp_inherit_sk(master_sk, meta_sk, AF_INET, GFP_ATOMIC);
+#endif /* CONFIG_IPV6 */
 
 	/* Store the keys and generate the peer's token */
 	mpcb->mptcp_loc_key = master_tp->mptcp_loc_key;
@@ -620,7 +627,7 @@ void mptcp_update_metasocket(struct sock *sk, struct mptcp_cb *mpcb)
 {
 
 	switch (sk->sk_family) {
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 	case AF_INET6:
 		/* If the socket is v4 mapped, we continue with v4 operations */
 		if (!mptcp_v6_is_v4_mapped(sk)) {
@@ -629,6 +636,7 @@ void mptcp_update_metasocket(struct sock *sk, struct mptcp_cb *mpcb)
 			mpcb->addr6[0].port = 0;
 			mpcb->addr6[0].low_prio = 0;
 			mpcb->loc6_bits |= 1;
+			mpcb->next_v6_index = 1;
 
 			mptcp_v6_add_raddress(&mpcb->rx_opt,
 					      &inet6_sk(sk)->daddr,
@@ -643,6 +651,7 @@ void mptcp_update_metasocket(struct sock *sk, struct mptcp_cb *mpcb)
 		mpcb->addr4[0].port = 0;
 		mpcb->addr4[0].low_prio = 0;
 		mpcb->loc4_bits |= 1;
+		mpcb->next_v4_index = 1;
 
 		mptcp_v4_add_raddress(&mpcb->rx_opt,
 				      (struct in_addr *)&inet_sk(sk)->inet_daddr,
@@ -657,7 +666,7 @@ void mptcp_update_metasocket(struct sock *sk, struct mptcp_cb *mpcb)
 	case AF_INET:
 		tcp_sk(sk)->low_prio = mpcb->addr4[0].low_prio;
 		break;
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+#if IS_ENABLED(CONFIG_IPV6)
 	case AF_INET6:
 		tcp_sk(sk)->low_prio = mpcb->addr6[0].low_prio;
 		break;
@@ -758,8 +767,7 @@ void mptcp_sub_close_wq(struct work_struct *work)
 	if (sock_flag(sk, SOCK_DEAD))
 		goto exit;
 
-	if (meta_sk->sk_shutdown == SHUTDOWN_MASK ||
-	    sk->sk_state == TCP_CLOSE)
+	if (meta_sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == TCP_CLOSE)
 		tcp_close(sk, 0);
 	else if (tcp_close_state(sk))
 		tcp_send_fin(sk);
@@ -879,7 +887,7 @@ void mptcp_close(struct sock *meta_sk, long timeout)
 	 * reader process may not have drained the data yet!
 	 */
 	while ((skb = __skb_dequeue(&meta_sk->sk_receive_queue)) != NULL) {
-		u32 len = TCP_SKB_CB(skb)->end_data_seq - TCP_SKB_CB(skb)->data_seq -
+		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq -
 			  (mptcp_is_data_fin(skb) ? 1 : 0);
 		data_was_unread += len;
 		__kfree_skb(skb);
@@ -1175,7 +1183,7 @@ int mptcp_check_req_master(struct sock *child, struct request_sock *req,
 		mpcb->rx_opt.dss_csum = sysctl_mptcp_checksum || req->dss_csum;
 		mpcb->rx_opt.mpcb = mpcb;
 
-		set_bit(MPCB_FLAG_SERVER_SIDE, &mpcb->flags);
+		mpcb->server_side = 1;
 		/* Will be moved to ESTABLISHED by
 		 * tcp_rcv_state_process()
 		 */
