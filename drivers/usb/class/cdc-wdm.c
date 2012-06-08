@@ -108,8 +108,9 @@ static void wdm_out_callback(struct urb *urb)
 	spin_lock(&desc->iuspin);
 	desc->werr = urb->status;
 	spin_unlock(&desc->iuspin);
-	clear_bit(WDM_IN_USE, &desc->flags);
 	kfree(desc->outbuf);
+	desc->outbuf = NULL;
+	clear_bit(WDM_IN_USE, &desc->flags);
 	wake_up(&desc->wait);
 }
 
@@ -312,7 +313,7 @@ static ssize_t wdm_write
 	if (we < 0)
 		return -EIO;
 
-	desc->outbuf = buf = kmalloc(count, GFP_KERNEL);
+	buf = kmalloc(count, GFP_KERNEL);
 	if (!buf) {
 		rv = -ENOMEM;
 		goto outnl;
@@ -376,10 +377,12 @@ static ssize_t wdm_write
 	req->wIndex = desc->inum;
 	req->wLength = cpu_to_le16(count);
 	set_bit(WDM_IN_USE, &desc->flags);
+	desc->outbuf = buf;
 
 	rv = usb_submit_urb(desc->command, GFP_KERNEL);
 	if (rv < 0) {
 		kfree(buf);
+		desc->outbuf = NULL;
 		clear_bit(WDM_IN_USE, &desc->flags);
 		dev_err(&desc->intf->dev, "Tx URB error: %d\n", rv);
 	} else {
@@ -493,11 +496,13 @@ static int wdm_flush(struct file *file, fl_owner_t id)
 	struct wdm_device *desc = file->private_data;
 
 	wait_event(desc->wait, !test_bit(WDM_IN_USE, &desc->flags));
-	if (desc->werr < 0)
+
+	/* cannot dereference desc->intf if WDM_DISCONNECTING */
+	if (desc->werr < 0 && !test_bit(WDM_DISCONNECTING, &desc->flags))
 		dev_err(&desc->intf->dev, "Error in flush path: %d\n",
 			desc->werr);
 
-	return desc->werr;
+	return usb_translate_errors(desc->werr);
 }
 
 static unsigned int wdm_poll(struct file *file, struct poll_table_struct *wait)
@@ -508,7 +513,7 @@ static unsigned int wdm_poll(struct file *file, struct poll_table_struct *wait)
 
 	spin_lock_irqsave(&desc->iuspin, flags);
 	if (test_bit(WDM_DISCONNECTING, &desc->flags)) {
-		mask = POLLERR;
+		mask = POLLHUP | POLLERR;
 		spin_unlock_irqrestore(&desc->iuspin, flags);
 		goto desc_out;
 	}
@@ -583,10 +588,15 @@ static int wdm_release(struct inode *inode, struct file *file)
 	mutex_unlock(&desc->wlock);
 
 	if (!desc->count) {
-		dev_dbg(&desc->intf->dev, "wdm_release: cleanup");
-		kill_urbs(desc);
-		if (!test_bit(WDM_DISCONNECTING, &desc->flags))
+		if (!test_bit(WDM_DISCONNECTING, &desc->flags)) {
+			dev_dbg(&desc->intf->dev, "wdm_release: cleanup");
+			kill_urbs(desc);
 			desc->intf->needs_remote_wakeup = 0;
+		} else {
+			/* must avoid dev_printk here as desc->intf is invalid */
+			pr_debug(KBUILD_MODNAME " %s: device gone - cleaning up\n", __func__);
+			cleanup(desc);
+		}
 	}
 	mutex_unlock(&wdm_mutex);
 	return 0;
@@ -802,6 +812,8 @@ static void wdm_disconnect(struct usb_interface *intf)
 	mutex_unlock(&desc->rlock);
 	if (!desc->count)
 		cleanup(desc);
+	else
+		dev_dbg(&intf->dev, "%s: %d open files - postponing cleanup\n", __func__, desc->count);
 	mutex_unlock(&wdm_mutex);
 }
 
