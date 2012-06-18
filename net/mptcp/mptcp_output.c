@@ -149,8 +149,10 @@ static struct mp_dss *mptcp_skb_find_dss(const struct sk_buff *skb)
 static int __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
 				 struct sock *sk, int clone_it)
 {
-	struct sk_buff *skb;
+	struct sk_buff *skb, *skb1;
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
+	struct mptcp_cb *mpcb = meta_tp->mpcb;
+	u32 seq, end_seq;
 
 	if (clone_it) {
 		/* pskb_copy is necessary here, because the TCP/IP-headers
@@ -202,8 +204,56 @@ static int __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk,
 
 	skb->sk = meta_sk;
 
-	skb_queue_tail(&meta_tp->mpcb->reinject_queue, skb);
+	/* If it's empty, just add */
+	if (skb_queue_empty(&mpcb->reinject_queue)) {
+		skb_queue_head(&mpcb->reinject_queue, skb);
+		return 0;
+	}
 
+	/* Find place to insert skb - or even we can 'drop' it, as the
+	 * data is already covered by other skb's in the reinject-queue.
+	 *
+	 * This is inspired by code from tcp_data_queue.
+	 */
+
+	skb1 = skb_peek_tail(&mpcb->reinject_queue);
+	seq = TCP_SKB_CB(skb)->seq;
+	end_seq = TCP_SKB_CB(skb)->end_seq;
+	while (1) {
+		if (!after(TCP_SKB_CB(skb1)->seq, seq))
+			break;
+		if (skb_queue_is_first(&mpcb->reinject_queue, skb1)) {
+			skb1 = NULL;
+			break;
+		}
+		skb1 = skb_queue_prev(&mpcb->reinject_queue, skb1);
+	}
+
+	/* Do skb overlap to previous one? */
+	if (skb1 && before(seq, TCP_SKB_CB(skb1)->end_seq)) {
+		if (!after(end_seq, TCP_SKB_CB(skb1)->end_seq)) {
+			/* All the bits are present. Don't reinject */
+			__kfree_skb(skb);
+			return 0;
+		}
+		if (seq == TCP_SKB_CB(skb1)->seq)
+			skb1 = skb_queue_prev(&mpcb->reinject_queue, skb1);
+	}
+	if (!skb1)
+		__skb_queue_head(&mpcb->reinject_queue, skb);
+	else
+		__skb_queue_after(&mpcb->reinject_queue, skb1, skb);
+
+	/* And clean segments covered by new one as whole. */
+	while (!skb_queue_is_last(&mpcb->reinject_queue, skb)) {
+		skb1 = skb_queue_next(&mpcb->reinject_queue, skb);
+
+		if (!after(end_seq, TCP_SKB_CB(skb1)->seq))
+			break;
+
+		__skb_unlink(skb1, &mpcb->reinject_queue);
+		__kfree_skb(skb1);
+	}
 	return 0;
 }
 
@@ -237,7 +287,15 @@ void mptcp_reinject_data(struct sock *sk, int clone_it)
 		if (__mptcp_reinject_data(skb_it, meta_sk, sk, clone_it))
 			continue;
 
-		tp->reinjected_seq = tcb->end_seq;
+		/* If clone_it == 0, then the socket will get destroyed soon
+		 * and we don't care about reinjected_seq.
+		 *
+		 * It's very important to then not change reinjected_seq, because
+		 * tcb->end_seq got changed to end_data_seq and this may block
+		 * further reinjection.
+		 */
+		if (clone_it)
+			tp->reinjected_seq = tcb->end_seq;
 	}
 
 	tcp_push(meta_sk, 0, mptcp_sysctl_mss(), TCP_NAGLE_PUSH);
@@ -505,7 +563,7 @@ static void mptcp_combine_dfin(struct sk_buff *skb, struct mptcp_cb *mpcb,
 {
 	struct sock *sk_it, *meta_sk = mpcb_meta_sk(mpcb);
 	struct tcp_sock *meta_tp = mpcb_meta_tp(mpcb);
-	int all_empty = 1, all_acked = 1;
+	int all_empty = 1, all_acked;
 
 	/* Don't combine, if they didn't combine - otherwise we end up in
 	 * TIME_WAIT, even if our app is smart enough to avoid it */
@@ -514,17 +572,16 @@ static void mptcp_combine_dfin(struct sk_buff *skb, struct mptcp_cb *mpcb,
 			return;
 	}
 
-	/* If no other subflow still has data to send, we can combine */
+	/* If no other subflow has data to send, we can combine */
 	mptcp_for_each_sk(mpcb, sk_it) {
 		if (!tcp_write_queue_empty(sk_it))
 			all_empty = 0;
 	}
 
-	/* If all data has been DATA_ACKed, we can combine
+	/* If all data has been DATA_ACKed, we can combine.
 	 * -1, because the data_fin consumed one byte
 	 */
-	if (meta_tp->snd_una != meta_tp->write_seq - 1)
-		all_acked = 0;
+	all_acked = (meta_tp->snd_una == (meta_tp->write_seq - 1));
 
 	if ((all_empty || all_acked) && tcp_close_state(subsk))
 		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;

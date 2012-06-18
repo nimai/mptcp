@@ -751,10 +751,10 @@ static inline int mptcp_check_rtt(struct tcp_sock *tp, int time)
 	 * in order to take into account meta-reordering buffers.
 	 */
 	mptcp_for_each_tp(mpcb, tp_tmp) {
-		if (rtt_max < (tp_tmp->rcv_rtt_est.rtt >> 3))
-			rtt_max = (tp_tmp->rcv_rtt_est.rtt >> 3);
+		if (rtt_max < tp_tmp->rcv_rtt_est.rtt)
+			rtt_max = tp_tmp->rcv_rtt_est.rtt;
 	}
-	if (time < rtt_max || !rtt_max)
+	if (time < (rtt_max >> 3) || !rtt_max)
 		return 1;
 
 	return 0;
@@ -847,7 +847,7 @@ static inline void mptcp_retransmit_queue(struct sock *sk)
 		mptcp_reinject_data(sk, 1);
 }
 
-static inline int mptcp_sk_can_send(struct sock *sk)
+static inline int mptcp_sk_can_send(const struct sock *sk)
 {
 	return (1 << sk->sk_state) & (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT);
 }
@@ -858,7 +858,7 @@ static inline void mptcp_set_rto(struct sock *sk)
 	struct sock *sk_it;
 	__u32 max_rto = 0;
 
-	if (!tp->mpc || !tp->mpcb)
+	if (!tp->mpc)
 		return;
 
 	mptcp_for_each_sk(tp->mpcb, sk_it) {
@@ -867,7 +867,7 @@ static inline void mptcp_set_rto(struct sock *sk)
 			max_rto = inet_csk(sk_it)->icsk_rto;
 	}
 	if (max_rto)
-		inet_csk(mpcb_meta_sk(tp->mpcb))->icsk_rto = max_rto * 2;
+		inet_csk(mpcb_meta_sk(tp->mpcb))->icsk_rto = max_rto << 1;
 }
 
 /* Maybe we could merge this with tcp_rearm_rto().
