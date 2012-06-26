@@ -727,6 +727,8 @@ extern void sk_stream_kill_queues(struct sock *sk);
 extern int sk_wait_data(struct sock *sk, long *timeo);
 
 extern void sock_def_error_report(struct sock *sk);
+extern struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
+				  int family);
 
 struct request_sock_ops;
 struct timewait_sock_ops;
@@ -1054,6 +1056,27 @@ do {									\
 	lockdep_init_map(&(sk)->sk_lock.dep_map, (name), (key), 0);	\
 } while (0)
 
+extern struct lock_class_key af_callback_keys[AF_MAX];
+extern struct lock_class_key af_family_keys[AF_MAX];
+extern struct lock_class_key af_family_slock_keys[AF_MAX];
+extern char *const af_family_slock_key_strings[AF_MAX+1];
+extern char *const af_family_key_strings[AF_MAX+1];
+extern char *const af_family_clock_key_strings[AF_MAX+1];
+
+/*
+ * Initialize an sk_lock.
+ *
+ * (We also register the sk_lock with the lock validator.)
+ */
+static inline void sock_lock_init(struct sock *sk)
+{
+	sock_lock_init_class_and_name(sk,
+			af_family_slock_key_strings[sk->sk_family],
+			af_family_slock_keys + sk->sk_family,
+			af_family_key_strings[sk->sk_family],
+			af_family_keys + sk->sk_family);
+}
+
 extern void lock_sock_nested(struct sock *sk, int subclass);
 
 static inline void lock_sock(struct sock *sk)
@@ -1062,9 +1085,6 @@ static inline void lock_sock(struct sock *sk)
 }
 
 extern void release_sock(struct sock *sk);
-struct mptcp_cb;
-extern void __release_sock(struct sock *sk, struct mptcp_cb *mpcb);
-
 
 /* BH context may only use the following locking interface. */
 #define bh_lock_sock(__sk)	spin_lock(&((__sk)->sk_lock.slock))
@@ -1098,10 +1118,7 @@ extern void			sk_free(struct sock *sk);
 extern void			sk_release_kernel(struct sock *sk);
 extern struct sock		*sk_clone(const struct sock *sk,
 					  const gfp_t priority);
-extern void mptcp_inherit_sk(struct sock *sk, struct sock *newsk, int family,
-			     const gfp_t flags);
-extern struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
-		int family);
+
 extern struct sk_buff		*sock_wmalloc(struct sock *sk,
 					      unsigned long size, int force,
 					      gfp_t priority);
@@ -1306,21 +1323,12 @@ static inline void sock_orphan(struct sock *sk)
 	write_unlock_bh(&sk->sk_callback_lock);
 }
 
-#ifdef CONFIG_MPTCP
-void mptcp_check_socket(struct sock *sk);
-#else
-static inline void mptcp_check_socket(struct sock *sk)
-{
-}
-#endif
-
 static inline void sock_graft(struct sock *sk, struct socket *parent)
 {
 	write_lock_bh(&sk->sk_callback_lock);
 	sk->sk_wq = parent->wq;
 	parent->sk = sk;
 	sk_set_socket(sk, parent);
-	mptcp_check_socket(sk);
 	security_sock_graft(sk, parent);
 	write_unlock_bh(&sk->sk_callback_lock);
 }

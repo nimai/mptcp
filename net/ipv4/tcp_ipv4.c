@@ -656,7 +656,7 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 	}
 #endif
 #ifdef CONFIG_MPTCP
-	if (sk && tcp_sk(sk)->csum_error) {
+	if (sk && tcp_sk(sk)->mptcp && tcp_sk(sk)->mptcp->csum_error) {
 		/* We had a checksum-error? -> Include MP_FAIL */
 		rep.mpfail.kind = TCPOPT_MPTCP;
 		rep.mpfail.len = MPTCP_SUB_LEN_FAIL;
@@ -689,7 +689,7 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb)
 	TCP_INC_STATS_BH(net, TCP_MIB_OUTRSTS);
 
 #ifdef CONFIG_MPTCP
-	if (sk && tcp_sk(sk)->teardown)
+	if (sk && tcp_sk(sk)->mptcp && tcp_sk(sk)->mptcp->teardown)
 		tcp_done(sk);
 #endif
 }
@@ -1767,7 +1767,6 @@ int tcp_v4_rcv(struct sk_buff *skb)
 				    skb->len - th->doff * 4);
 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
 #ifdef CONFIG_MPTCP
-	/* Init to zero, will be set upon option parsing. */
 	TCP_SKB_CB(skb)->mptcp_flags = 0;
 	TCP_SKB_CB(skb)->dss_off = 0;
 #endif
@@ -1829,6 +1828,7 @@ process:
 		meta_sk = mptcp_meta_sk(sk);
 
 		bh_lock_sock_nested(meta_sk);
+		skb->sk = sk;
 	} else {
 		bh_lock_sock_nested(sk);
 
@@ -1838,6 +1838,7 @@ process:
 
 			bh_unlock_sock(sk);
 			bh_lock_sock_nested(meta_sk);
+			skb->sk = sk;
 		}
 	}
 
@@ -1847,7 +1848,7 @@ process:
 		if (!sock_owned_by_user(meta_sk)) {
 			if (!tcp_prequeue(sk, skb))
 				ret = tcp_v4_do_rcv(sk, skb);
-		} else if (unlikely(sk_add_backlog(sk, skb))) {
+		} else if (unlikely(sk_add_backlog(meta_sk, skb))) {
 			bh_unlock_sock(meta_sk);
 			NET_INC_STATS_BH(net, LINUX_MIB_TCPBACKLOGDROP);
 			goto discard_and_relse;
@@ -2098,10 +2099,12 @@ void tcp_v4_destroy_sock(struct sock *sk)
 	tcp_write_queue_purge(sk);
 
 	/* Cleans up our, hopefully empty, out_of_order_queue. */
-	if (is_meta_sk(sk))
+	if (is_meta_sk(sk)) {
+		__skb_queue_purge(&tp->mpcb->reinject_queue);
 		mptcp_purge_ofo_queue(tp);
-	else
+	} else {
 		__skb_queue_purge(&tp->out_of_order_queue);
+	}
 
 #ifdef CONFIG_TCP_MD5SIG
 	/* Clean up the MD5 key list, if any */

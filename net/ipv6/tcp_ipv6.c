@@ -1003,7 +1003,7 @@ static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack,
 		tot_len += TCPOLEN_MD5SIG_ALIGNED;
 #endif
 #ifdef CONFIG_MPTCP
-	if (rst && sk && tcp_sk(sk)->csum_error)
+	if (rst && sk && tcp_sk(sk)->mptcp && tcp_sk(sk)->mptcp->csum_error)
 		tot_len += MPTCP_SUB_LEN_FAIL_ALIGN;
 	if (mptcp)
 		tot_len += MPTCP_SUB_LEN_DSS + MPTCP_SUB_LEN_ACK;
@@ -1049,7 +1049,7 @@ static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack,
 	}
 #endif
 #ifdef CONFIG_MPTCP
-	if (rst && sk && tcp_sk(sk)->csum_error) {
+	if (rst && sk && tcp_sk(sk)->mptcp && tcp_sk(sk)->mptcp->csum_error) {
 		struct mp_fail *mpfail = (struct mp_fail *)topt;;
 
 		mpfail->kind = TCPOPT_MPTCP;
@@ -1102,7 +1102,7 @@ static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack,
 	kfree_skb(buff);
 
 #ifdef CONFIG_MPTCP
-	if (rst && sk && tcp_sk(sk)->teardown)
+	if (rst && sk && tcp_sk(sk)->mptcp && tcp_sk(sk)->mptcp->teardown)
 		tcp_done(sk);
 #endif
 }
@@ -1790,7 +1790,6 @@ static int tcp_v6_rcv(struct sk_buff *skb)
 				    skb->len - th->doff*4);
 	TCP_SKB_CB(skb)->ack_seq = ntohl(th->ack_seq);
 #ifdef CONFIG_MPTCP
-	/*Init to zero, will be set upon option parsing.*/
 	TCP_SKB_CB(skb)->mptcp_flags = 0;
 	TCP_SKB_CB(skb)->dss_off = 0;
 #endif
@@ -1851,6 +1850,7 @@ process:
 		meta_sk = mptcp_meta_sk(sk);
 
 		bh_lock_sock_nested(meta_sk);
+		skb->sk = sk;
 	} else {
 		bh_lock_sock_nested(sk);
 
@@ -1860,6 +1860,7 @@ process:
 
 			bh_unlock_sock(sk);
 			bh_lock_sock_nested(meta_sk);
+			skb->sk = sk;
 		}
 	}
 
@@ -1869,7 +1870,7 @@ process:
 		if (!sock_owned_by_user(meta_sk)) {
 			if (!tcp_prequeue(sk, skb))
 				ret = tcp_v6_do_rcv(sk, skb);
-		} else if (unlikely(sk_add_backlog(sk, skb))) {
+		} else if (unlikely(sk_add_backlog(meta_sk, skb))) {
 			bh_unlock_sock(meta_sk);
 			NET_INC_STATS_BH(net, LINUX_MIB_TCPBACKLOGDROP);
 			goto discard_and_relse;

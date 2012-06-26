@@ -359,19 +359,17 @@ void mptcp_init4_subsockets(struct mptcp_cb *mpcb,
 	}
 
 	sk = sock.sk;
-
-	inet_sk(sk)->loc_id = loc->id;
-	inet_sk(sk)->rem_id = rem->id;
-
-	tp = tcp_sk(sk);
-	tp->path_index = newpi;
-	tp->mpc = 1;
-	tp->slave_sk = 1;
-	tp->low_prio = loc->low_prio;
-
 	sk->sk_error_report = mptcp_sock_def_error_report;
 
-	mptcp_add_sock(mpcb, tp);
+	tp = tcp_sk(sk);
+	if (mptcp_add_sock(mpcb, tp, GFP_KERNEL))
+		goto error;
+
+	tp->mptcp->rem_id = rem->id;
+	tp->mptcp->path_index = newpi;
+	tp->mpc = 1;
+	tp->mptcp->slave_sk = 1;
+	tp->mptcp->low_prio = loc->low_prio;
 
 	/** Then, connect the socket to the peer */
 
@@ -487,15 +485,11 @@ void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 	if (event == NETDEV_UP && netif_running(ifa->ifa_dev->dev)) {
 		i = __mptcp_find_free_index(mpcb->loc4_bits, 0, mpcb->next_v4_index);
 		if (i < 0) {
-			printk(KERN_DEBUG "MPTCP_PM: NETDEV_UP Reached max "
-					"number of local IPv4 addresses: %d\n",
-					MPTCP_MAX_ADDR);
+			mptcp_debug("MPTCP_PM: NETDEV_UP Reached max "
+				    "number of local IPv4 addresses: %d\n",
+				    MPTCP_MAX_ADDR);
 			return;
 		}
-
-		printk(KERN_DEBUG "MPTCP_PM: NETDEV_UP adding "
-			"address %pI4 to existing connection with mpcb: %#x\n",
-			&ifa->ifa_local, mpcb->mptcp_loc_token);
 
 		/* update this mpcb */
 		mpcb->addr4[i].addr.s_addr = ifa->ifa_local;
@@ -518,21 +512,18 @@ found:
 			continue;
 
 		if (event == NETDEV_DOWN) {
-			printk(KERN_DEBUG "MPTCP_PM: NETDEV_DOWN %pI4, "
-					"pi %d, loc_id %u\n", &ifa->ifa_local,
-					tp->path_index, inet_sk(sk)->loc_id);
 			mptcp_retransmit_queue(sk);
 
 			mptcp_sub_force_close(sk);
 		} else if (event == NETDEV_CHANGE) {
 			int new_low_prio = (ifa->ifa_dev->dev->flags & IFF_MPBACKUP) ?
 						1 : 0;
-			if (new_low_prio != tp->low_prio)
-				tp->send_mp_prio = 1;
-			tp->low_prio = new_low_prio;
+			if (new_low_prio != tp->mptcp->low_prio)
+				tp->mptcp->send_mp_prio = 1;
+			tp->mptcp->low_prio = new_low_prio;
 		} else {
 			printk(KERN_DEBUG "MPTCP_PM: NETDEV_UP %pI4, pi %d\n",
-					&ifa->ifa_local, tp->path_index);
+					&ifa->ifa_local, tp->mptcp->path_index);
 			BUG();
 		}
 	}
@@ -559,7 +550,7 @@ void mptcp_v4_send_add_addr(int loc_id, struct mptcp_cb *mpcb)
 	struct tcp_sock *tp;
 
 	mptcp_for_each_tp(mpcb, tp)
-		tp->add_addr4 |= (1 << loc_id);
+		tp->mptcp->add_addr4 |= (1 << loc_id);
 }
 
 static struct notifier_block mptcp_pm_inetaddr_notifier = {

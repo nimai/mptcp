@@ -528,10 +528,6 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct request_sock *req,
 			treq->snt_isn + 1 + tcp_s_data_size(oldtp);
 #ifdef CONFIG_MPTCP
 		newtp->rx_opt.rcv_isn = treq->rcv_isn;
-		newtp->snt_isn = treq->snt_isn;
-		newtp->reinjected_seq = newtp->snd_una;
-		newtp->init_rcv_wnd = req->rcv_wnd;
-		newtp->last_rbuf_opti = 0;
 		memset(&newtp->rcvq_space, 0, sizeof(newtp->rcvq_space));
 #endif
 
@@ -823,8 +819,13 @@ struct sock *tcp_check_req(struct sock *sk, struct sk_buff *skb,
 		goto listen_overflow;
 
 	if (!is_meta_sk(sk)) {
-		if (mptcp_check_req_master(child, req, mopt) == -ENOBUFS)
+		int ret = mptcp_check_req_master(sk, child, req, prev, mopt);
+		if (ret < 0)
 			goto listen_overflow;
+
+		/* MPTCP-supported */
+		if (!ret)
+			return child;
 	} else {
 		return mptcp_check_req_child(sk, child, req, prev);
 	}
