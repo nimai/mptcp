@@ -1081,7 +1081,7 @@ if (unlikely(sysctl_mptcp_debug)) {
 				continue;
 			mptcp_debug("%s: pi:%d, rcvbuf:%d, "
 				"rmem_alloc:%d\n",
-				__func__, tcp_sk(sk)->path_index,
+				__func__, tcp_sk(sk)->mptcp->path_index,
 				sk->sk_rcvbuf,
 				atomic_read(&sk->sk_rmem_alloc));
 			mptcp_debug("%s: used mss for wnd "
