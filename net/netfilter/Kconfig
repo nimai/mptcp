@@ -869,6 +869,13 @@ config NETFILTER_XT_MATCH_MARK
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_MARK (combined mark/MARK module).
 
+config NETFILTER_XT_MATCH_MPTCP
+    tristate '"mptcp" extension support'
+    depends on NETFILTER_XTABLES
+    ---help---
+    The xt_mptcp module allows you to match TCP segments parts of a MPTCP
+    connection.
+
 config NETFILTER_XT_MATCH_MULTIPORT
 	tristate '"multiport" Multiple port match support'
 	depends on NETFILTER_ADVANCED
