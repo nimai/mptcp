@@ -14,17 +14,44 @@
 /*#include "compat_xtables.h" */
 #include <linux/netfilter/xt_mptcp.h>
 
+/* Debugging help function */
+char* format_stack_bytes(const unsigned char* ptr, unsigned short n)
+{
+    int i, s=n*3+n/16+3;
+    char* dbgstr, *p;
+    dbgstr = (char*)kmalloc(s, GFP_KERNEL);
+    p=dbgstr;
+    for (i=0; i<n; i++) {
+        if (i % 16 == 0)
+            p+=sprintf(p, "\n");
+        p+=sprintf(p, "%02x ", *(ptr+i));
+    }
+    p += sprintf(p, "\n");
+    return dbgstr;
+}
+
 /* Find an mptcp option in the set of TCP options. Return true if it finds any.
  * Inspired by tcp_parse_options() from tcp-input.c
  */
 static bool 
-find_mptcp_option(const struct sk_buff *skb)
+find_mptcp_option(const struct tcphdr *th)
 {
-    unsigned char *ptr;
-	struct tcphdr *th = tcp_hdr(skb);
+    const unsigned char *ptr;
 	int length = (th->doff * 4) - sizeof(struct tcphdr);
+    
+    /*
+    char* dbgstr;
+    printk(KERN_DEBUG "tcp header:\n"
+            "source: %u dest: %u\n"
+            "offset: %u window: %u\n\n", th->source, th->dest,
+            th->doff, th->window);
+    dbgstr = format_stack_bytes((unsigned char*)th, 80))    
+    printk(KERN_DEBUG "%s", dbgstr);
+    kfree(dbgstr);
+    */
 
-	ptr = (unsigned char *)(th + 1);
+    ptr = (const unsigned char *)(th + 1); /* skip the common tcp header */
+    printk(KERN_DEBUG "find_mptcp_option: length=%i, opcode=%i\n", length, *ptr);
 
 	while (length > 0) {
 		int opcode = *ptr++;
@@ -38,6 +65,7 @@ find_mptcp_option(const struct sk_buff *skb)
             continue;
         default:
 			opsize = *ptr++;
+            printk(KERN_DEBUG "find_mptcp_option: opsize = %i\n", opsize);
 			if (opsize < 2) /* "silly options" */
 				return false;
 			if (opsize > length)
@@ -59,7 +87,9 @@ static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
 	const struct xt_mptcp_mtinfo *info = par->matchinfo;
 	const struct iphdr *iph = ip_hdr(skb);
 
-    const bool mptcp_present = find_mptcp_option(skb);
+    const bool mptcp_present = 
+        find_mptcp_option((const struct tcphdr*)(iph+1));
+
 
 	printk(KERN_INFO
 	       "xt_mptcp: IN=%s OUT=%s "
@@ -69,13 +99,22 @@ static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
 	       &iph->saddr, &iph->daddr,
            mptcp_present?"true":"false");
 
+    printk(KERN_DEBUG "match flags: %u ?= %u, f&c: %u", info->flags, XT_MPTCP_PRESENT, info->flags&XT_MPTCP_PRESENT);
+/*	if (info->flags & XT_MPTCP_PRESENT) */
+		if (mptcp_present) {
+			printk(KERN_NOTICE "mptcp in use - match\n");
+			return true;
+        }
+    
+    
+    /*
 	if (info->flags & XT_MPTCP_PRESENT)
 		if (mptcp_present ^
 		    !!(info->flags & XT_MPTCP_PRESENT_INV)) {
 			printk(KERN_NOTICE "mptcp in use - match\n");
 			return true;
 		}
-
+    */
 	printk(KERN_NOTICE "mptcp NOT in use - no match\n");
 	return false;
 }
@@ -85,7 +124,8 @@ static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 	const struct xt_mptcp_mtinfo *info = par->matchinfo;
 	const struct ipv6hdr *iph = ipv6_hdr(skb);
     
-    const bool mptcp_present = find_mptcp_option(skb);
+    const bool mptcp_present = 
+        find_mptcp_option((const struct tcphdr*)(iph+1));
 
 	printk(KERN_INFO
 	       "xt_mptcp: IN=%s OUT=%s "
@@ -95,12 +135,11 @@ static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 	       &iph->saddr, &iph->daddr,
            mptcp_present ? "true":"false");
 
-	if (info->flags & XT_MPTCP_PRESENT)
-		if (mptcp_present ^
-		    !!(info->flags & XT_MPTCP_PRESENT_INV)) {
+	/*if (info->flags & XT_MPTCP_PRESENT) {*/
+		if (mptcp_present) {
 			printk(KERN_NOTICE "mptcp in use - match\n");
 			return true;
-		}
+        }
 
 	printk(KERN_NOTICE "mptcp NOT in use - no match\n");
 	return false;
@@ -108,7 +147,7 @@ static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 
 static int mptcp_mt_check(const struct xt_mtchk_param *par)
 {
-	const struct xt_mptcp_mtinfo *info = par->matchinfo;
+	/*const struct xt_mptcp_mtinfo *info = par->matchinfo;*/
 
 	printk(KERN_INFO "xt_mptcp: Added a rule with -m mptcp in "
 	       "the %s table; this rule is reachable through hooks 0x%x\n",
