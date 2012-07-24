@@ -12,10 +12,12 @@
  *	Gregory Detal <gregory.detal@uclouvain.be>
  *	Fabien Duchêne <fabien.duchene@uclouvain.be>
  *	Andreas Seelinger <Andreas.Seelinger@rwth-aachen.de>
+ *	Lavkesh Lahngir <lavkesh51@gmail.com>
  *	Andreas Ripke <ripke@neclab.eu>
  *	Vlad Dogaru <vlad.dogaru@intel.com>
- *	Lavkesh Lahngir <lavkesh51@gmail.com>
+ *	Octavian Purdila <octavian.purdila@intel.com>
  *	John Ronan <jronan@tssg.org>
+ *	Catalin Nicutar <catalin.nicutar@gmail.com>
  *	Brandon Heller <brandonh@stanford.edu>
  *
  *
@@ -35,6 +37,9 @@
 #include <net/mptcp_pm.h>
 #include <net/request_sock.h>
 #include <net/sock.h>
+
+extern struct request_sock_ops mptcp_request_sock_ops;
+extern struct proto mptcp_prot;
 
 #ifdef CONFIG_MPTCP
 

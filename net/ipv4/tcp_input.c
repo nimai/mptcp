@@ -3539,10 +3539,8 @@ static int tcp_ack_update_window(struct sock *sk, const struct sk_buff *skb, u32
 
 no_window_update:
 	tp->snd_una = ack;
-#ifdef CONFIG_MPTCP
 	if (tp->mptcp && after(tp->snd_una, tp->mptcp->reinjected_seq))
 		tp->mptcp->reinjected_seq = tp->snd_una;
-#endif
 
 	return flag;
 }
@@ -3947,12 +3945,10 @@ void tcp_parse_options(const struct sk_buff *skb, struct tcp_options_received *o
 					break;
 				}
 				break;
-#ifdef CONFIG_MPTCP
 			case TCPOPT_MPTCP:
 				mptcp_parse_options(ptr - 2, opsize, opt_rx,
 						    mopt, skb);
 				break;
-#endif
 			}
 
 			ptr += opsize-2;
@@ -4192,10 +4188,8 @@ static void tcp_fin(struct sock *sk)
 	case TCP_ESTABLISHED:
 		/* Move to CLOSE_WAIT */
 		tcp_set_state(sk, TCP_CLOSE_WAIT);
-#ifdef CONFIG_MPTCP
 		if (tp->mpc && tp->mpcb->passive_close)
 			mptcp_sub_close(sk, 0);
-#endif
 		inet_csk(sk)->icsk_ack.pingpong = 1;
 		break;
 
@@ -4475,6 +4469,9 @@ static void tcp_ofo_queue(struct sock *sk)
 			__kfree_skb(skb);
 	}
 }
+
+static int tcp_prune_ofo_queue(struct sock *sk);
+static int tcp_prune_queue(struct sock *sk);
 
 static inline int tcp_try_rmem_schedule(struct sock *sk, unsigned int size)
 {
@@ -4770,13 +4767,6 @@ static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
  *
  * Segments with FIN/SYN are not collapsed (only because this
  * simplifies code)
- *
- * TODO: for MPTCP, we CANNOT collapse segments that have non contiguous
- * dataseq numbers. It is possible the seq numbers are contiguous but not
- * dataseq. In that case we must keep the segments separated. Until this
- * is supported, we disable the tcp_collapse function.
- * NOTE that when supporting this, we will need to ensure that the path_index
- * field is copied when creating the new skbuff.
  */
 static void
 tcp_collapse(struct sock *sk, struct sk_buff_head *list,
@@ -4995,7 +4985,6 @@ int tcp_prune_queue(struct sock *sk)
 			     skb_peek(&sk->sk_receive_queue),
 			     NULL,
 			     tp->copied_seq, tp->rcv_nxt);
-
 	sk_mem_reclaim(sk);
 
 	if (atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf)
@@ -5047,12 +5036,11 @@ void tcp_cwnd_application_limited(struct sock *sk)
 static int tcp_should_expand_sndbuf(const struct sock *sk)
 {
 	const struct tcp_sock *tp = tcp_sk(sk);
-	const struct sock *meta_sk = tp->mpc ? mpcb_meta_sk(tp->mpcb) : sk;
 
 	/* If the user specified a specific send buffer setting, do
 	 * not modify it.
 	 */
-	if (meta_sk->sk_userlocks & SOCK_SNDBUF_LOCK)
+	if (sk->sk_userlocks & SOCK_SNDBUF_LOCK)
 		return 0;
 
 	/* If we are under global TCP memory pressure, do not expand.  */
@@ -5117,7 +5105,7 @@ static void tcp_new_space(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *meta_sk = tp->mpc ? mpcb_meta_sk(tp->mpcb) : sk;
 
-	if (tcp_should_expand_sndbuf(sk)) {
+	if (tcp_should_expand_sndbuf(meta_sk)) {
 		int sndmem = SKB_TRUESIZE(max_t(u32,
 						tp->rx_opt.mss_clamp,
 						tp->mss_cache) +
@@ -5149,11 +5137,6 @@ static void tcp_new_space(struct sock *sk)
 	meta_sk->sk_write_space(meta_sk);
 }
 
-
-/**
- * If the flow is MPTCP, sk is the subsock, and meta_sk is the mpcb.
- * Otherwise both are the regular TCP socket.
- */
 static void tcp_check_space(struct sock *sk)
 {
 	struct sock *meta_sk = tcp_sk(sk)->mpc ? mpcb_meta_sk(tcp_sk(sk)->mpcb) : sk;
@@ -5791,49 +5774,45 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 				tp->mptcp->teardown = 1;
 				goto reset_and_undo;
 			}
-		}
+		} else if (tp->rx_opt.saw_mpc){
+			tp->rx_opt.saw_mpc = 0;
 
-		if (is_master_tp(tp)) {
-			if (tp->rx_opt.saw_mpc) {
-				tp->rx_opt.saw_mpc = 0;
+			/* If alloc failed - fall back to regular TCP */
+			if (unlikely(mptcp_alloc_mpcb(sk, mopt.mptcp_rem_key)))
+				goto cont_mptcp;
 
-				/* If alloc failed - fall back to regular TCP */
-				if (unlikely(mptcp_alloc_mpcb(sk, mopt.mptcp_rem_key)))
-					goto cont_mptcp;
+			tp->mpc = 1;
 
-				tp->mpc = 1;
-
-				if (mptcp_add_sock(tp->mpcb, tp, GFP_ATOMIC)) {
-					mptcp_destroy_mpcb(tp->mpcb);
-					tp->mpc = 0;
-					tp->mpcb = NULL;
-					goto cont_mptcp;
-				}
-
-				/* snd_nxt - 1, because it has been incremented
-				 * by tcp_connect for the SYN
-				 */
-				tp->mptcp->snt_isn = tp->snd_nxt - 1;
-				tp->mptcp->reinjected_seq = tp->snd_nxt - 1;
-				tp->mptcp->init_rcv_wnd = tp->rcv_wnd;
-				tp->mptcp->path_index = 1;
-
-				mpcb = tp->mpcb;
-
-				mpcb->rx_opt.dss_csum = mopt.dss_csum;
-				mpcb->rx_opt.mpcb = mpcb;
-				mpcb->rx_opt.list_rcvd = 1;
-
-				sk->sk_socket->sk = mptcp_meta_sk(sk);
-
-				mptcp_update_metasocket(sk, mpcb);
-				mptcp_path_array_check(mpcb);
-
-				 /* hold in mptcp_inherit_sk due to initialization to 2 */
-				sock_put(mpcb_meta_sk(mpcb));
-			} else {
-				tp->request_mptcp = 0;
+			if (mptcp_add_sock(tp->mpcb, tp, GFP_ATOMIC)) {
+				mptcp_destroy_mpcb(tp->mpcb);
+				tp->mpc = 0;
+				tp->mpcb = NULL;
+				goto cont_mptcp;
 			}
+
+			/* snd_nxt - 1, because it has been incremented
+			 * by tcp_connect for the SYN
+			 */
+			tp->mptcp->snt_isn = tp->snd_nxt - 1;
+			tp->mptcp->reinjected_seq = tp->snd_nxt - 1;
+			tp->mptcp->init_rcv_wnd = tp->rcv_wnd;
+			tp->mptcp->path_index = 1;
+
+			mpcb = tp->mpcb;
+
+			mpcb->rx_opt.dss_csum = mopt.dss_csum;
+			mpcb->rx_opt.mpcb = mpcb;
+			mpcb->rx_opt.list_rcvd = 1;
+
+			sk->sk_socket->sk = mptcp_meta_sk(sk);
+
+			mptcp_update_metasocket(sk, mpcb);
+			mptcp_path_array_check(mpcb);
+
+			 /* hold in mptcp_inherit_sk due to initialization to 2 */
+			sock_put(mpcb_meta_sk(mpcb));
+		} else {
+			tp->request_mptcp = 0;
 		}
 		mptcp_include_mpc(tp);
 cont_mptcp:
@@ -5851,6 +5830,7 @@ cont_mptcp:
 		if (tp->mpc)
 			/* -1 because rcv_nxt is not the data-seq number of the SYN/ACK */
 			mpcb_meta_tp(mpcb)->snd_wl1 = mpcb_meta_tp(mpcb)->rcv_nxt - 1;
+			/* For the subflow, snd_wl1 does not matter */
 		else
 			tp->snd_wl1 = TCP_SKB_CB(skb)->seq;
 		tcp_ack(sk, skb, FLAG_SLOWPATH);
@@ -5870,7 +5850,7 @@ cont_mptcp:
 		 * never scaled.
 		 */
 		if (tp->mpc) {
-			mpcb_meta_tp(mpcb)->snd_wnd = ntohs(th->window);
+			mpcb_meta_tp(mpcb)->snd_wnd = tp->snd_wnd = ntohs(th->window);
 			tcp_init_wl(mpcb_meta_tp(mpcb),
 					mpcb_meta_tp(mpcb)->rcv_nxt);
 		} else {
