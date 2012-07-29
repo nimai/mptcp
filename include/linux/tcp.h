@@ -258,11 +258,12 @@ struct tcp_out_options {
 	__u64	receiver_key;	/* receiver's key for mptcp */
 	__u64	sender_truncated_mac;
 	__u32	sender_nonce;	/* random number of the sender */
-	__u32	receiver_nonce;	/* random number of the receiver */
 	__u32	token;		/* token for mptcp */
 	char	sender_mac[20];
-	struct mptcp_loc4 *addr4;/* v4 addresses for MPTCP */
-	struct mptcp_loc6 *addr6;/* v6 addresses for MPTCP */
+	union {
+		struct mptcp_loc4 *addr4;/* v4 addresses for MPTCP */
+		struct mptcp_loc6 *addr6;/* v6 addresses for MPTCP */
+	};
 	u8	addr_id;	/* address id */
 	u16	remove_addrs;	/* list of address id */
 #endif /* CONFIG_MPTCP */
@@ -327,6 +328,7 @@ struct tcp_request_sock {
 	u32				rcv_isn;
 	u32				snt_isn;
 	u32				snt_synack; /* synack sent time */
+	u8				saw_mpc:1;
 };
 
 static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
@@ -524,8 +526,9 @@ struct tcp_sock {
 		       * stop using the subflow
 		       */
 		mp_killed:1, /* Killed with a tcp_done in mptcp? */
-		mptcp_add_addr_ack:1;	/* Tell tcp_send_ack to return in case
+		mptcp_add_addr_ack:1,	/* Tell tcp_send_ack to return in case
 					 * alloc_skb fails. */
+		was_meta_sk:1; /* This was a meta sk (in case of reuse) */
 	struct mptcp_tcp_sock *mptcp;
 #ifdef CONFIG_MPTCP
 	u32		mptcp_loc_token;

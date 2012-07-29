@@ -62,6 +62,10 @@ struct nf_conntrack_tuple {
 			struct {
 				__be16 key;
 			} gre;
+            struct {
+                __be16 port;
+                __u32 token;
+            } mptcp;
 		} u;
 
 		/* The protocol. */

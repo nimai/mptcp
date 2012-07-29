@@ -458,7 +458,6 @@ unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 	}
 	/* This barrier is coupled with smp_wmb() in tcp_reset() */
 	smp_rmb();
-
 	if (sk->sk_err)
 		mask |= POLLERR;
 
@@ -524,6 +523,17 @@ int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg)
 }
 EXPORT_SYMBOL(tcp_ioctl);
 
+static inline void tcp_mark_push(struct tcp_sock *tp, struct sk_buff *skb)
+{
+	TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
+	tp->pushed_seq = tp->write_seq;
+}
+
+static inline int forced_push(const struct tcp_sock *tp)
+{
+	return after(tp->write_seq, tp->pushed_seq + (tp->max_window >> 1));
+}
+
 static inline void skb_entail(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -542,18 +552,27 @@ static inline void skb_entail(struct sock *sk, struct sk_buff *skb)
 		tp->nonagle &= ~TCP_NAGLE_PUSH;
 }
 
+static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
+{
+	if (flags & MSG_OOB)
+		tp->snd_up = tp->write_seq;
+}
+
 void tcp_push(struct sock *sk, int flags, int mss_now,
 			    int nonagle)
 {
-	if (tcp_sk(sk)->mpc) {
-		mptcp_push(sk, flags, mss_now, nonagle);
-		return;
-	}
+	struct sk_buff *skb;
+	int reinject = 0;
 
-	if (tcp_send_head(sk)) {
+	if (tcp_sk(sk)->mpc)
+		skb = mptcp_next_segment(sk, &reinject);
+	else
+		skb = tcp_send_head(sk);
+
+	if (skb) {
 		struct tcp_sock *tp = tcp_sk(sk);
 
-		if (!(flags & MSG_MORE) || forced_push(tp))
+		if (!reinject && (!(flags & MSG_MORE) || forced_push(tp)))
 			tcp_mark_push(tp, tcp_write_queue_tail(sk));
 
 		tcp_mark_urg(tp, flags);
@@ -642,13 +661,26 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
 			release_sock(sk);
 			return err;
 		}
-
-		if (tcp_sk(sk)->mpc && !is_meta_sk(sk)) {
-			release_sock(sk);
-			mptcp_update_pointers(&sk, NULL, NULL);
-			lock_sock(sk);
-		}
 	}
+
+	/* This may happen, if the socket became MP_CAPABLE, while waiting for
+	 * the lock or while waiting in sk_stream_wait_connect.
+	 */
+	if (tcp_sk(sk)->mptcp && !is_meta_sk(sk)) {
+		struct sock *sk_it;
+
+		release_sock(sk);
+		mptcp_update_pointers(&sk, NULL, NULL);
+
+	        mptcp_for_each_sk(tcp_sk(sk)->mpcb, sk_it) {
+			if (!is_master_tp(tcp_sk(sk_it)))
+	                        sock_rps_record_flow(sk_it);
+	        }
+
+		lock_sock(sk);
+	}
+
+
 #endif
 
 	timeo = sock_rcvtimeo(sk, sock->file->f_flags & O_NONBLOCK);
@@ -946,6 +978,8 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	int sg, err, copied;
 	long timeo;
 
+	lock_sock(sk);
+
 	if (tp->mptcp) {
 		struct sock *sk_it;
 
@@ -955,29 +989,29 @@ int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		}
 	}
 
-	lock_sock(sk);
-
 	flags = msg->msg_flags;
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
 	/* Wait for a connection to finish. */
-	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) {
+	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
 		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
 			goto out_err;
 
-		if (tp->mptcp && !is_meta_sk(sk)) {
-			struct sock *sk_it;
+	/* This may happen, if the socket became MP_CAPABLE, while waiting for
+	 * the lock or while waiting in sk_stream_wait_connect.
+	 */
+	if (tp->mptcp && !is_meta_sk(sk)) {
+		struct sock *sk_it;
 
-			release_sock(sk);
-			mptcp_update_pointers(&sk, &tp, NULL);
+		release_sock(sk);
+		mptcp_update_pointers(&sk, &tp, NULL);
 
-		        mptcp_for_each_sk(tp->mpcb, sk_it) {
-				if (!is_master_tp(tcp_sk(sk_it)))
-		                        sock_rps_record_flow(sk_it);
-		        }
+	        mptcp_for_each_sk(tp->mpcb, sk_it) {
+			if (!is_master_tp(tcp_sk(sk_it)))
+	                        sock_rps_record_flow(sk_it);
+	        }
 
-			lock_sock(sk);
-		}
+		lock_sock(sk);
 	}
 
 	/* This should be in poll */
@@ -1432,9 +1466,7 @@ static inline struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
 	u32 offset;
 
 	skb_queue_walk(&sk->sk_receive_queue, skb) {
-
 		offset = seq - TCP_SKB_CB(skb)->seq;
-
 		if (tcp_hdr(skb)->syn)
 			offset--;
 		if (offset < skb->len || (!tcp_sk(sk)->mpc && tcp_hdr(skb)->fin) ||
@@ -1559,9 +1591,11 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	int copied_early = 0;
 	struct sk_buff *skb;
 	u32 urg_hole = 0;
-	/* MPTCP variables */
 	struct mptcp_cb *mpcb = tp->mptcp ? tp->mpcb : NULL;
 	struct sock *sk_it = tp->mptcp ? NULL : sk;
+
+	lock_sock(sk);
+
 #ifdef CONFIG_MPTCP
 	if (mpcb) {
 		mptcp_for_each_sk(mpcb, sk_it) {
@@ -1570,8 +1604,6 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		}
 	}
 #endif
-
-	lock_sock(sk);
 
 	err = -ENOTCONN;
 	if (sk->sk_state == TCP_LISTEN)
@@ -1582,17 +1614,28 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 #ifdef CONFIG_MPTCP
 	/* Wait for the mptcp connection to establish. */
 	if (tp->request_mptcp && !is_meta_sk(sk) &&
-	    ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))) {
-		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0) {
+	    ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)))
+		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
 			goto out;
-		}
 
-		if (tp->mptcp && !is_meta_sk(sk)) {
-			release_sock(sk);
-			mptcp_update_pointers(&sk, &tp, &mpcb);
-			lock_sock(sk);
-		}
+	/* This may happen, if the socket became MP_CAPABLE, while waiting for
+	 * the lock or while waiting in sk_stream_wait_connect.
+	 */
+	if (tp->mptcp && !is_meta_sk(sk)) {
+		struct sock *sk_it;
+
+		release_sock(sk);
+		mptcp_update_pointers(&sk, &tp, NULL);
+
+	        mptcp_for_each_sk(tp->mpcb, sk_it) {
+			if (!is_master_tp(tcp_sk(sk_it)))
+	                        sock_rps_record_flow(sk_it);
+	        }
+
+		lock_sock(sk);
 	}
+
+
 #endif
 
 	/* Urgent data needs to be handled specially. */
@@ -1655,7 +1698,6 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 				break;
 
 			offset = *seq - TCP_SKB_CB(skb)->seq;
-
 			if (tcp_hdr(skb)->syn)
 				offset--;
 			if (offset < skb->len)
@@ -2091,13 +2133,7 @@ void tcp_close(struct sock *sk, long timeout)
 	int data_was_unread = 0;
 	int state;
 
-	if (is_meta_sk(sk)) {
-		mptcp_close(sk, timeout);
-		return;
-	}
-
-	if (!tcp_sk(sk)->mpc)
-		lock_sock(sk);
+	lock_sock(sk);
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
 	if (sk->sk_state == TCP_LISTEN) {
@@ -2179,15 +2215,14 @@ adjudge_to_death:
 	sock_orphan(sk);
 
 	/* It is the last release_sock in its life. It will remove backlog. */
-	if (!tcp_sk(sk)->mpc)
-		release_sock(sk);
+	release_sock(sk);
+
 
 	/* Now socket is owned by kernel and we acquire BH lock
 	   to finish close. No need to check for user refs.
 	 */
 	local_bh_disable();
-	if (!tcp_sk(sk)->mpc)
-		bh_lock_sock(sk);
+	bh_lock_sock(sk);
 	WARN_ON(sock_owned_by_user(sk));
 
 	percpu_counter_inc(sk->sk_prot->orphan_count);
@@ -2247,8 +2282,7 @@ adjudge_to_death:
 	/* Otherwise, socket is reprieved until protocol close. */
 
 out:
-	if (!tcp_sk(sk)->mpc)
-		bh_unlock_sock(sk);
+	bh_unlock_sock(sk);
 	local_bh_enable();
 	sock_put(sk);
 }
@@ -2300,6 +2334,31 @@ int tcp_disconnect(struct sock *sk, int flags)
 
 	if (!(sk->sk_userlocks & SOCK_BINDADDR_LOCK))
 		inet_reset_saddr(sk);
+
+#ifdef CONFIG_MPTCP
+	if (is_meta_sk(sk)) {
+		struct sock *current_sk;
+		struct tcp_sock *tp = tcp_sk(sk);
+
+		__skb_queue_purge(&tp->mpcb->reinject_queue);
+
+		mptcp_hash_remove(tp->mpcb);
+		reqsk_queue_destroy(&((struct inet_connection_sock *)tp->mpcb)->icsk_accept_queue);
+
+		local_bh_disable();
+		mptcp_for_each_sk(tp->mpcb, current_sk) {
+			mptcp_del_sock(current_sk);
+			tcp_sk(current_sk)->mpc = 0;
+			tcp_sk(current_sk)->mpcb = NULL;
+			mptcp_sub_force_close(current_sk);
+		}
+		local_bh_enable();
+
+		tp->was_meta_sk = 1;
+		tp->mpc = 0;
+		tp->mpcb = NULL;
+	}
+#endif
 
 	sk->sk_shutdown = 0;
 	sock_reset_flag(sk, SOCK_DONE);
@@ -3421,7 +3480,7 @@ void tcp_done(struct sock *sk)
 
 	if (!sock_flag(sk, SOCK_DEAD)) {
 		/* In case of mptcp, only wake up if it's the meta-sk */
-		if ((tp->mpc && is_meta_sk(sk)) || !tp->mpc)
+		if ((!tp->mpc && !tp->was_meta_sk) || is_meta_sk(sk))
 			sk->sk_state_change(sk);
 	} else {
 		inet_csk_destroy_sock(sk);

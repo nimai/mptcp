@@ -374,13 +374,6 @@ struct sk_buff {
 	struct sk_buff		*next;
 	struct sk_buff		*prev;
 
-#ifdef CONFIG_MPTCP
-	short                   is_node;
-	struct sock             *shortcut_owner; /* Owner of a shortcut pointer
-						  * to this skb. Used by the
-						  * out-of-order BST
-						  */
-#endif
 	ktime_t			tstamp;
 
 	struct sock		*sk;
@@ -392,11 +385,7 @@ struct sk_buff {
 	 * want to keep them across layers you have to do a skb_clone()
 	 * first. This is owned by whoever has the skb queued ATM.
 	 */
-#ifdef CONFIG_MPTCP
-	char			cb[56] __aligned(8);
-#else
 	char			cb[48] __aligned(8);
-#endif
 
 	unsigned long		_skb_refdst;
 #ifdef CONFIG_XFRM

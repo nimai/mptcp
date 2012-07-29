@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 
 #include <net/netfilter/nf_conntrack_mptcp.h>
+#include <net/mptcp.h>
 
 
 #ifdef CONFIG_NF_MPTCP
@@ -25,7 +26,8 @@ struct nf_mptcp_conn *nf_mptcp_hash_find(u32 token)
 
 	read_lock(&htb_lock);
 	list_for_each_entry(mptcp_conn, &mptcp_conn_htb[hash], collide_tk) {
-		if (token == mptcp_conn->token) { /*TODO: token in tuple ?*/
+		if (token == mptcp_conn->conn.tuplehash[IP_CT_DIR_ORIGINAL]
+                .tuple.dst.u.mptcp.token) { 
 	        read_unlock(&htb_lock);
             return mptcp_conn;
         }
@@ -53,14 +55,13 @@ void nf_mptcp_hash_remove(struct nf_mptcp_conn *mpconn)
 	write_unlock_bh(&htb_lock);
 }
 
-struct mp_join *mptcp_find_join(struct sk_buff *skb)
+struct mp_join *mptcp_find_join(struct tcphdr* th)
 {
-	struct tcphdr *th = tcp_hdr(skb);
-	unsigned char *ptr;
+	__u8 *ptr;
 	int length = (th->doff * 4) - sizeof(struct tcphdr);
 
 	/* Jump through the options to check whether JOIN is there */
-	ptr = (unsigned char *)(th + 1);
+	ptr = (__u8)(th + 1);
 	while (length > 0) {
 		int opcode = *ptr++;
 		int opsize;
@@ -78,14 +79,29 @@ struct mp_join *mptcp_find_join(struct sk_buff *skb)
 			if (opsize > length)
 				return NULL;  /* don't parse partial options */
 			if (opcode == TCPOPT_MPTCP &&
-			    ((struct mptcp_option *)(ptr - 2))->sub == MPTCP_SUB_JOIN) {
-				return (struct mp_join *)(ptr - 2);
+			    ((struct mptcp_option *)(ptr-2))->sub == MPTCP_SUB_JOIN) {
+				return (struct mp_join *)(ptr-2);
 			}
 			ptr += opsize - 2;
 			length -= opsize;
 		}
 	}
 	return NULL;
+}
+
+__u32 mptcp_get_token(struct tcphdr* th)
+{
+    mp_join* mpj;
+    /* The token is only available in a SYN segment */
+    if (!th->syn)
+        return NULL;
+
+    mpj = mptcp_find_join(th);
+
+    if (mpj && mpj->u.syn.token)
+        return mpj->u.syn.token;
+    else
+        return NULL;
 }
 
 

@@ -12,10 +12,12 @@
  *	Gregory Detal <gregory.detal@uclouvain.be>
  *	Fabien Duchêne <fabien.duchene@uclouvain.be>
  *	Andreas Seelinger <Andreas.Seelinger@rwth-aachen.de>
+ *	Lavkesh Lahngir <lavkesh51@gmail.com>
  *	Andreas Ripke <ripke@neclab.eu>
  *	Vlad Dogaru <vlad.dogaru@intel.com>
- *	Lavkesh Lahngir <lavkesh51@gmail.com>
+ *	Octavian Purdila <octavian.purdila@intel.com>
  *	John Ronan <jronan@tssg.org>
+ *	Catalin Nicutar <catalin.nicutar@gmail.com>
  *	Brandon Heller <brandonh@stanford.edu>
  *
  *
@@ -87,7 +89,6 @@ extern spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
 
 extern spinlock_t mptcp_reqsk_tk_hlock;	/* hashtable protection */
 
-void mptcp_hash_request_remove(struct request_sock *req);
 void mptcp_send_updatenotif(struct mptcp_cb *mpcb);
 
 void mptcp_send_updatenotif_wq(struct work_struct *work);
@@ -107,17 +108,9 @@ int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family);
 struct sock *mptcp_select_loc_sock(const struct mptcp_cb *mpcb, u16 ids);
 
 #else /* CONFIG_MPTCP */
-
-static inline void mptcp_update_patharray(struct mptcp_cb *mpcb)
+static inline int mptcp_find_token(u32 token)
 {
-}
-
-static inline void mptcp_hash_request_remove(struct request_sock *req)
-{
-}
-
-static inline void mptcp_send_updatenotif(struct mptcp_cb *mpcb)
-{
+	return 0;
 }
 
 #endif /* CONFIG_MPTCP */

@@ -41,7 +41,6 @@ struct mptcp_option {
 
 struct nf_mptcp_conn {
     struct nf_conn conn;
-    u32 token; /* XXX not needed if token in tuple */
     struct list_head collide_tk; 
 };
 

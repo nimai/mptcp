@@ -33,6 +33,7 @@ int sysctl_tcp_retries2 __read_mostly = TCP_RETR2;
 int sysctl_tcp_orphan_retries __read_mostly;
 int sysctl_tcp_thin_linear_timeouts __read_mostly;
 
+static void tcp_write_timer(unsigned long);
 static void tcp_delack_timer(unsigned long);
 static void tcp_keepalive_timer (unsigned long data);
 
@@ -67,8 +68,7 @@ static int tcp_out_of_resources(struct sock *sk, int do_reset)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	int shift = 0;
-	u32 snd_wnd = (tp->mpc && tp->mpcb) ?
-		mpcb_meta_tp(tp->mpcb)->snd_wnd : tp->snd_wnd;
+	u32 snd_wnd = tp->mpc ? mpcb_meta_tp(tp->mpcb)->snd_wnd : tp->snd_wnd;
 
 	/* If peer does not open window for long time, or did not transmit
 	 * anything for long time, penalize it. */
@@ -326,8 +326,7 @@ void tcp_retransmit_timer(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct inet_connection_sock *icsk = inet_csk(sk);
-	u32 snd_wnd = (tp->mpc && tp->mpcb) ?
-		mpcb_meta_tp(tp->mpcb)->snd_wnd : tp->snd_wnd;
+	u32 snd_wnd = tp->mpc ? mpcb_meta_tp(tp->mpcb)->snd_wnd : tp->snd_wnd;
 
 	if (!tp->packets_out)
 		goto out;
@@ -454,7 +453,7 @@ out_reset_timer:
 out:;
 }
 
-void tcp_write_timer(unsigned long data)
+static void tcp_write_timer(unsigned long data)
 {
 	struct sock *sk = (struct sock *)data;
 	struct tcp_sock *tp = tcp_sk(sk);

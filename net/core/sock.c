@@ -132,7 +132,6 @@
 
 #ifdef CONFIG_INET
 #include <net/tcp.h>
-#include <net/mptcp.h>
 #endif
 
 /*
@@ -973,6 +972,20 @@ lenout:
 }
 
 /*
+ * Initialize an sk_lock.
+ *
+ * (We also register the sk_lock with the lock validator.)
+ */
+void sock_lock_init(struct sock *sk)
+{
+	sock_lock_init_class_and_name(sk,
+			af_family_slock_key_strings[sk->sk_family],
+			af_family_slock_keys + sk->sk_family,
+			af_family_key_strings[sk->sk_family],
+			af_family_keys + sk->sk_family);
+}
+
+/*
  * Copy all fields from osk to nsk but nsk->sk_refcnt must not change yet,
  * even temporarly, because of RCU lookups. sk_node should also be left as is.
  * We must not copy fields between sk_dontcopy_begin and sk_dontcopy_end
@@ -1131,17 +1144,8 @@ static void __sk_free(struct sock *sk)
 {
 	struct sk_filter *filter;
 
-	if (sk->sk_destruct) {
-		/* Ugly hack at the moment - sk_destruct (inet_sock_destruct)
-		 * called mpcb_release who destroyed the mpcb.
-		 * Thus, we have to stop here. */
-		if (is_meta_sk(sk)) {
-			sk->sk_destruct(sk);
-			return;
-		}
-
+	if (sk->sk_destruct)
 		sk->sk_destruct(sk);
-	}
 
 	filter = rcu_dereference_check(sk->sk_filter,
 				       atomic_read(&sk->sk_wmem_alloc) == 0);
@@ -1489,9 +1493,6 @@ struct sk_buff *sock_alloc_send_pskb(struct sock *sk, unsigned long header_len,
 				     unsigned long data_len, int noblock,
 				     int *errcode)
 {
-	struct sock *meta_sk = (sk->sk_protocol == IPPROTO_TCP &&
-				tcp_sk(sk)->mpcb) ?
-				(struct sock *)tcp_sk(sk)->mpcb : sk;
 	struct sk_buff *skb;
 	gfp_t gfp_mask;
 	long timeo;
@@ -1549,8 +1550,8 @@ struct sk_buff *sock_alloc_send_pskb(struct sock *sk, unsigned long header_len,
 			err = -ENOBUFS;
 			goto failure;
 		}
-		set_bit(SOCK_ASYNC_NOSPACE, &meta_sk->sk_socket->flags);
-		set_bit(SOCK_NOSPACE, &meta_sk->sk_socket->flags);
+		set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
+		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 		err = -EAGAIN;
 		if (!timeo)
 			goto failure;
@@ -2445,18 +2446,6 @@ void proto_unregister(struct proto *prot)
 	}
 }
 EXPORT_SYMBOL(proto_unregister);
-
-void sk_wake_async(struct sock *sk, int how, int band)
-{
-	if (sk->sk_type == SOCK_STREAM && sk->sk_protocol == IPPROTO_TCP &&
-	    tcp_sk(sk)->mpc) {
-		sk = mptcp_meta_sk(sk);
-	}
-
-	if (sock_flag(sk, SOCK_FASYNC))
-		sock_wake_async(sk->sk_socket, how, band);
-}
-EXPORT_SYMBOL(sk_wake_async);
 
 #ifdef CONFIG_PROC_FS
 static void *proto_seq_start(struct seq_file *seq, loff_t *pos)
