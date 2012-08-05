@@ -28,6 +28,8 @@
 #include <net/netfilter/nf_log.h>
 #include <net/netfilter/ipv4/nf_conntrack_ipv4.h>
 #include <net/netfilter/ipv6/nf_conntrack_ipv6.h>
+#include <linux/netfilter/nf_conntrack_mptcp.h>
+
 
 /* "Be conservative in what you do,
     be liberal in what you accept from others."
@@ -58,6 +60,8 @@ static const char *const tcp_conntrack_names[] = {
 	"CLOSE",
 	"SYN_SENT2",
 };
+EXPORT_SYMBOL(nf_mptcp_get_ptr);
+EXPORT_SYMBOL(nf_ct_mptcp_new);
 
 #define SECS * HZ
 #define MINS * 60 SECS
@@ -300,6 +304,7 @@ static bool tcp_invert_tuple(struct nf_conntrack_tuple *tuple,
 static int tcp_print_tuple(struct seq_file *s,
 			   const struct nf_conntrack_tuple *tuple)
 {
+	/* TODO: token */
 	return seq_printf(s, "sport=%hu dport=%hu ",
 			  ntohs(tuple->src.u.tcp.port),
 			  ntohs(tuple->dst.u.tcp.port));
@@ -1123,6 +1128,12 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 sender->td_scale,
 		 receiver->td_end, receiver->td_maxend, receiver->td_maxwin,
 		 receiver->td_scale);
+
+	nf_ct_mptcp_new(th, ct);
+#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
+	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#endif /* CONFIG_NF_CONNTRACK_MPTCP */
+
 	return true;
 }
 

@@ -199,6 +199,16 @@ config NF_CONNTRACK_IRC
 config NF_CONNTRACK_BROADCAST
 	tristate
 
+config NF_CONNTRACK_MPTCP
+	tristate 'MPTCP protocol connection tracking support (EXPERIMENTAL)'
+	depends on EXPERIMENTAL
+	help
+	  With this option enabled, the TCP protocol tracker will be 
+	  extended to support the MPTCP protocol induced by the introduction
+	  of the MPTCP option.
+
+	  If unsure, say 'N'.
+
 config NF_CONNTRACK_NETBIOS_NS
 	tristate "NetBIOS name service protocol support"
 	select NF_CONNTRACK_BROADCAST
@@ -870,8 +880,8 @@ config NETFILTER_XT_MATCH_MARK
 	CONFIG_NETFILTER_XT_MARK (combined mark/MARK module).
 
 config NETFILTER_XT_MATCH_MPTCP
-    tristate '"mptcp" extension support'
-    depends on NETFILTER_XTABLES
+    tristate '"mptcp" match support'
+    depends on NETFILTER_XTABLES && NF_CONNTRACK_MPTCP
     ---help---
     The xt_mptcp module allows you to match TCP segments parts of a MPTCP
     connection.

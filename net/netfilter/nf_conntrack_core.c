@@ -1,4 +1,5 @@
 /* Connection state tracking for netfilter.  This is separated from,
+ *
    but required by, the NAT layer; it can also be used by an iptables
    extension. */
 
@@ -766,7 +767,8 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 			     GFP_ATOMIC);
 
 	spin_lock_bh(&nf_conntrack_lock);
-	exp = nf_ct_find_expectation(net, zone, tuple);
+    
+    exp = nf_ct_find_expectation(net, zone, tuple);
 	if (exp) {
 		pr_debug("conntrack: expectation arrives ct=%p exp=%p\n",
 			 ct, exp);
