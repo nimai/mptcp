@@ -1,4 +1,5 @@
 /* Connection state tracking for netfilter.  This is separated from,
+ *
    but required by, the NAT layer; it can also be used by an iptables
    extension. */
 
@@ -740,8 +741,6 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 	struct nf_conntrack_ecache *ecache;
 	struct nf_conntrack_expect *exp;
 	u16 zone = tmpl ? nf_ct_zone(tmpl) : NF_CT_DEFAULT_ZONE;
-    __u32 join_token;
-	struct nf_mptcp_conn* mptcp_conn;
 
 	if (!nf_ct_invert_tuple(&repl_tuple, tuple, l3proto, l4proto)) {
 		pr_debug("Can't invert tuple.\n");
@@ -769,22 +768,6 @@ init_conntrack(struct net *net, struct nf_conn *tmpl,
 
 	spin_lock_bh(&nf_conntrack_lock);
     
-    /* Is this a subflow of an existing MultipathTCP connection ? */
-    /* join_token = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u.mptcp.token; */
-    /* TODO: EXPECTED -> NEW_SUBFLOW */
-	/*if (!strcmp(l4proto->name, "mptcp")) {*/
-	if (find_mptcp_option((__u8*)skb+dataoff)) {
-		join_token = tuple.dst.u.mptcp.token;
-		/* if we find an existing conn matching this conn's token 
-		 * mark the new connection as an expected one */
-		mptcp_conn = nf_mptcp_hash_find(join_token);
-		if (mptcp_conn) {
-			pr_debug("conntrack: new subflow arrives ct=%p\n",ct);
-			__set_bit(IPS_EXPECTED_BIT, &ct->status);
-			/* TODO: mark/secmark/stat ? */
-		}
-	}
-	
     exp = nf_ct_find_expectation(net, zone, tuple);
 	if (exp) {
 		pr_debug("conntrack: expectation arrives ct=%p exp=%p\n",

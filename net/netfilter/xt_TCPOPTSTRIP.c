@@ -48,15 +48,15 @@ tcpoptstrip_mangle_packet(struct sk_buff *skb,
 	 * Walk through all TCP options - if we find some option to remove,
 	 * set all octets to %TCPOPT_NOP and adjust checksum.
 	 */
-	for (i = sizeof(struct tcphdr); i < tcp_hdrlen(skb); i += optl) {
+	for (i = sizeof(struct tcphdr); i < tcph->doff*4; i += optl) {
 		optl = optlen(opt, i);
 
-		if (i + optl > tcp_hdrlen(skb))
+		if (i + optl > tcph->doff*4)
 			break;
 
 		if (!tcpoptstrip_test_bit(info->strip_bmap, opt[i]))
 			continue;
-
+        
 		for (j = 0; j < optl; ++j) {
 			o = opt[i+j];
 			n = TCPOPT_NOP;
@@ -69,7 +69,7 @@ tcpoptstrip_mangle_packet(struct sk_buff *skb,
 		}
 		memset(opt + i, TCPOPT_NOP, optl);
 	}
-
+    
 	return XT_CONTINUE;
 }
 

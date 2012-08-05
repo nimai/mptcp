@@ -10,77 +10,10 @@
 #include <linux/netfilter/x_tables.h>
 #include <net/ipv6.h>
 #include <net/tcp.h>
-/* needed for xtables-addons */
-/*#include "compat_xtables.h" */
+
 #include <linux/netfilter/xt_mptcp.h>
+#include <linux/netfilter/nf_conntrack_mptcp.h>
 
-/* Debugging help function */
-char* format_stack_bytes(const unsigned char* ptr, unsigned short n)
-{
-    int i, s=n*3+n/16+3;
-    char* dbgstr, *p;
-    dbgstr = (char*)kmalloc(s, GFP_KERNEL);
-    p=dbgstr;
-    for (i=0; i<n; i++) {
-        if (i % 16 == 0)
-            p+=sprintf(p, "\n");
-        p+=sprintf(p, "%02x ", *(ptr+i));
-    }
-    p += sprintf(p, "\n");
-    return dbgstr;
-}
-
-/* Find an mptcp option in the set of TCP options. Return true if it finds any.
- * Inspired by tcp_parse_options() from tcp-input.c
- */
-static bool 
-find_mptcp_option(const struct tcphdr *th)
-{
-    const unsigned char *ptr;
-	int length = (th->doff * 4) - sizeof(struct tcphdr);
-    
-    /*
-    char* dbgstr;
-    printk(KERN_DEBUG "tcp header:\n"
-            "source: %u dest: %u\n"
-            "offset: %u window: %u\n\n", th->source, th->dest,
-            th->doff, th->window);
-    dbgstr = format_stack_bytes((unsigned char*)th, 80))    
-    printk(KERN_DEBUG "%s", dbgstr);
-    kfree(dbgstr);
-    */
-
-    ptr = (const unsigned char *)(th + 1); /* skip the common tcp header */
-    printk(KERN_DEBUG "find_mptcp_option: length=%i, opcode=%i\n", length, *ptr);
-
-	while (length > 0) {
-		int opcode = *ptr++;
-		int opsize;
-
-        switch (opcode) {
-        case TCPOPT_EOL:
-            return false;
-        case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
-            length--;
-            continue;
-        default:
-			opsize = *ptr++;
-            printk(KERN_DEBUG "find_mptcp_option: opsize = %i\n", opsize);
-			if (opsize < 2) /* "silly options" */
-				return false;
-			if (opsize > length)
-				return false;	/* don't parse partial options */
-			switch (opcode) {
-			case TCPOPT_MPTCP:
-                return true;
-			}
-            ptr += opsize-2;
-		    length -= opsize;
-        }
-    }
-    /* no mptcp option has been found after the whole parsing */
-    return false;
-}
 
 static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
 {
@@ -88,8 +21,7 @@ static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
 	const struct iphdr *iph = ip_hdr(skb);
 
     const bool mptcp_present = 
-        find_mptcp_option((const struct tcphdr*)(iph+1));
-
+        !!nf_mptcp_get_ptr((const struct tcphdr*)(iph + 1));
 
 	printk(KERN_INFO
 	       "xt_mptcp: IN=%s OUT=%s "
@@ -105,8 +37,6 @@ static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
 			printk(KERN_NOTICE "mptcp in use - match\n");
 			return true;
         }
-    
-    
     /*
 	if (info->flags & XT_MPTCP_PRESENT)
 		if (mptcp_present ^
@@ -125,7 +55,7 @@ static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 	const struct ipv6hdr *iph = ipv6_hdr(skb);
     
     const bool mptcp_present = 
-        find_mptcp_option((const struct tcphdr*)(iph+1));
+        !!nf_mptcp_get_ptr((const struct tcphdr*)(iph + 1));
 
 	printk(KERN_INFO
 	       "xt_mptcp: IN=%s OUT=%s "
