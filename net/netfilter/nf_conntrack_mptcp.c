@@ -134,7 +134,8 @@ struct mp_join *mptcp_find_joinv2(struct tcphdr *th)
  * Return a pointer to the option in the skb
  * or NULL if it can't be found.
  */
-struct mptcp_option *nf_mptcp_get_ptr_impl(const struct tcphdr *th)
+#if 0
+struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
 {
     __u8 *ptr;
 	int length = (th->doff * 4) - sizeof(struct tcphdr);
@@ -179,6 +180,7 @@ struct mptcp_option *nf_mptcp_get_ptr_impl(const struct tcphdr *th)
     /* no mptcp option has been found after the whole parsing */
     return NULL;
 }
+#endif 
 
 /* Get the token from a mp_join structure from a SYN packet */
 static inline __u32 __nf_mptcp_get_token(struct mp_join *mpj)
@@ -427,18 +429,21 @@ static int __init nf_conntrack_mptcp_init(void)
 	int i;
 	
 	extern void (*nf_ct_mptcp_new)(const struct tcphdr*, struct nf_conn*);
-	extern struct mptcp_option* (*nf_mptcp_get_ptr)(const struct tcphdr*);
 	
 	/*extern void nf_ct_mptcp_new;
 	extern struct mptcp_option* nf_mptcp_get_ptr;
 	extern (struct mptcp_option*)(const struct tcphdr*) nf_mptcp_get_ptr;
+	extern struct mptcp_option* (*nf_mptcp_get_ptr)(const struct tcphdr *th);
+	nf_mptcp_get_ptr_impl = &__nf_mptcp_get_ptr;
 	*/
 	pr_debug("nf_ct_mptcp: loading mptcp module");
-	/* trampoline init 
-	nf_ct_mptcp_mod = THIS_MODULE; */
+	printk(KERN_DEBUG "nf_ct_mptcp: loading mptcp module\n");
+	/* trampoline init */
+	nf_conntrack_mptcp_mod = THIS_MODULE; 
 	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl;
+	/*
 	nf_mptcp_get_ptr = &nf_mptcp_get_ptr_impl;
-
+*/
 	/* hashtable init */
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
 		INIT_LIST_HEAD(&mptcp_conn_htb[i]);
@@ -451,12 +456,15 @@ static void __exit nf_conntrack_mptcp_fini(void)
 {
 	int i;
 	pr_debug("nf_ct_mptcp: unloading mptcp module");
+	printk(KERN_DEBUG "nf_ct_mptcp: unloading mptcp module\n");
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
 		nf_mptcp_hash_free(&mptcp_conn_htb[i]);
 	}
 
 	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl0;
-	nf_mptcp_get_ptr = &nf_mptcp_get_ptr_impl0;
+/*	nf_mptcp_get_ptr = &nf_mptcp_get_ptr_impl0;
+	nf_mptcp_get_ptr_impl = &nf_mptcp_get_ptr_impl0;
+ */
 }
 
 module_init(nf_conntrack_mptcp_init);
