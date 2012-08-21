@@ -23,9 +23,9 @@ static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
     const bool mptcp_present = 
         !!nf_mptcp_get_ptr((const struct tcphdr*)(iph + 1));
 
-	printk(KERN_INFO
+	printk(KERN_DEBUG
 	       "xt_mptcp: IN=%s OUT=%s "
-           "SRC=%pI4 DIST=%pI4 MPTCP_present=%s \n",
+           "SRC=%pI4 DST=%pI4 MPTCP_present=%s \n",
 	       (par->in != NULL) ? par->in->name : "",
 	       (par->out != NULL) ? par->out->name : "",
 	       &iph->saddr, &iph->daddr,
@@ -59,7 +59,7 @@ static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 
 	printk(KERN_INFO
 	       "xt_mptcp: IN=%s OUT=%s "
-           "SRC=%pI6 DIST=%pI6 MPTCP_present=%s \n",
+           "SRC=%pI6 DST=%pI6 MPTCP_present=%s \n",
 	       (par->in != NULL) ? par->in->name : "",
 	       (par->out != NULL) ? par->out->name : "",
 	       &iph->saddr, &iph->daddr,
