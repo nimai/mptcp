@@ -60,7 +60,7 @@ static const char *const tcp_conntrack_names[] = {
 	"CLOSE",
 	"SYN_SENT2",
 };
-EXPORT_SYMBOL(nf_mptcp_get_ptr);
+EXPORT_SYMBOL(nf_conntrack_mptcp_mod);
 EXPORT_SYMBOL(nf_ct_mptcp_new);
 
 #define SECS * HZ
@@ -1129,9 +1129,9 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 receiver->td_end, receiver->td_maxend, receiver->td_maxwin,
 		 receiver->td_scale);
 
-	nf_ct_mptcp_new(th, ct);
 #if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
 	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+	nf_ct_mptcp_new(th, ct);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 
 	return true;
