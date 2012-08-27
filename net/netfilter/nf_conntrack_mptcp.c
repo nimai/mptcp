@@ -304,7 +304,7 @@ void nf_ct_mptcp_new_impl(const struct tcphdr *th,
 			mpct->confirmed = true; /* FIXME temporary */
 			nf_mptcp_hash_insert(mpct, token);
 			/* Keep a ref to master mptcp connnection in every nf_conn */
-			ct->master = (struct nf_conn*)mpct;
+			ct->mpmaster = mpct;
 		}
 		break;
 	}
@@ -322,7 +322,7 @@ void nf_ct_mptcp_packet(const struct tcphdr *th, struct nf_conn *ct,
 	if (!(mptr = nf_mptcp_get_ptr(th)))
 		return; /* FIXME should not use NF_ACCEPT */
 
-	mpct = (struct nf_conn_mptcp*)ct->master; 
+	mpct = ct->mpmaster; 
 	switch (mptr->sub) {
 	case MPTCP_SUB_CAPABLE:
 		break;
@@ -428,22 +428,20 @@ static int __init nf_conntrack_mptcp_init(void)
 {
 	int i;
 	
-	extern void (*nf_ct_mptcp_new)(const struct tcphdr*, struct nf_conn*);
 	
-	/*extern void nf_ct_mptcp_new;
+	/*
+	extern void (*nf_ct_mptcp_new)(const struct tcphdr*, struct nf_conn*);
+	extern  nf_ct_mptcp_new;
 	extern struct mptcp_option* nf_mptcp_get_ptr;
 	extern (struct mptcp_option*)(const struct tcphdr*) nf_mptcp_get_ptr;
 	extern struct mptcp_option* (*nf_mptcp_get_ptr)(const struct tcphdr *th);
 	nf_mptcp_get_ptr_impl = &__nf_mptcp_get_ptr;
 	*/
-	pr_debug("nf_ct_mptcp: loading mptcp module");
 	printk(KERN_DEBUG "nf_ct_mptcp: loading mptcp module\n");
 	/* trampoline init */
 	nf_conntrack_mptcp_mod = THIS_MODULE; 
 	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl;
-	/*
-	nf_mptcp_get_ptr = &nf_mptcp_get_ptr_impl;
-*/
+	
 	/* hashtable init */
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
 		INIT_LIST_HEAD(&mptcp_conn_htb[i]);
@@ -455,16 +453,12 @@ static int __init nf_conntrack_mptcp_init(void)
 static void __exit nf_conntrack_mptcp_fini(void)
 {
 	int i;
-	pr_debug("nf_ct_mptcp: unloading mptcp module");
 	printk(KERN_DEBUG "nf_ct_mptcp: unloading mptcp module\n");
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
 		nf_mptcp_hash_free(&mptcp_conn_htb[i]);
 	}
 
 	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl0;
-/*	nf_mptcp_get_ptr = &nf_mptcp_get_ptr_impl0;
-	nf_mptcp_get_ptr_impl = &nf_mptcp_get_ptr_impl0;
- */
 }
 
 module_init(nf_conntrack_mptcp_init);

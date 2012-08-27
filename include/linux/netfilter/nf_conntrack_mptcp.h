@@ -9,7 +9,7 @@
 
 /* MPTCP connection tracking helper */
 
-/* This structure exists only once per master */
+/* This structure exists only once per mptcp-level connection */
 struct nf_conn_mptcp {
 	/* Directions are relative to MP_CAPABLE SYN packet.
 	 * For data relative to a specific host:
@@ -17,11 +17,16 @@ struct nf_conn_mptcp {
 	 *	IP_CT_DIR_REPLY: receiver
 	 */
 	__u64 key[IP_CT_DIR_MAX]; 
-	__u32 nonce[IP_CT_DIR_MAX];
 	__u32 token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
-    struct list_head collide_tk; /* item of 2 hash tables */ 
+    struct list_head collide_tk; /* item of hash tables */ 
 	bool confirmed;
 };
+
+
+struct mptcp_subflow_info {
+	__u32 nonce[IP_CT_DIR_MAX];
+}
+
 
 
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
@@ -101,12 +106,26 @@ struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
 struct mptcp_option *nf_mptcp_get_ptr_impl0(const struct tcphdr *th) {
 		printk(KERN_DEBUG "NO IMPLEM -- dont know why :(");
 		return NULL;
+
+
 struct mptcp_option *(*nf_mptcp_get_ptr)(const struct tcphdr *th) = 
 	&nf_mptcp_get_ptr_impl0;
-#endif
 
+void nf_ct_mptcp_new(const struct tcphdr *th) 
+{
+	struct mptcp_option *ret = NULL;
+	if (try_module_get(nf_conntrack_mptcp_mod)) {
+		ret = (*nf_ct_mptcp_new_impl)(th);
+		module_put(nf_conntrack_mptcp_mod);
+	}
+	else {
+		printk(KERN_DEBUG "NO IMPLEM -- not loaded");
+	}
+	return ret;
+}
+#endif
 void nf_ct_mptcp_new_impl0(const struct tcphdr *th, struct nf_conn *ct) {}
-void (*nf_ct_mptcp_new)(const struct tcphdr *th, struct nf_conn *ct) =
+void (*nf_ct_mptcp_new)(const struct tcphdr *th, struct nf_conn *ct) = 
 	&nf_ct_mptcp_new_impl0;
 
 
