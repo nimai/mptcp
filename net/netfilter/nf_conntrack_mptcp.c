@@ -12,11 +12,10 @@
 
 #define NF_MPTCP_HASH_SIZE 256
 
-/* trampoline
-struct module *nf_ct_mptcp_mod;
-EXPORT_SYMBOL(nf_ct_mptcp_mod);
-*/
 
+
+extern struct module* nf_conntrack_mptcp_mod;
+extern void (*nf_ct_mptcp_new_implptr)(const struct tcphdr *th, struct nf_conn *ct);
 
 /* Hashtables to retrieve nf_conn_mptcp from token, one for each direction */
 static struct list_head mptcp_conn_htb[NF_MPTCP_HASH_SIZE];
@@ -440,7 +439,7 @@ static int __init nf_conntrack_mptcp_init(void)
 	printk(KERN_DEBUG "nf_ct_mptcp: loading mptcp module\n");
 	/* trampoline init */
 	nf_conntrack_mptcp_mod = THIS_MODULE; 
-	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl;
+	nf_ct_mptcp_new_implptr = &nf_ct_mptcp_new_impl;
 	
 	/* hashtable init */
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
@@ -458,7 +457,7 @@ static void __exit nf_conntrack_mptcp_fini(void)
 		nf_mptcp_hash_free(&mptcp_conn_htb[i]);
 	}
 
-	nf_ct_mptcp_new = &nf_ct_mptcp_new_impl0;
+	nf_ct_mptcp_new_implptr = NULL;
 }
 
 module_init(nf_conntrack_mptcp_init);

@@ -60,8 +60,24 @@ static const char *const tcp_conntrack_names[] = {
 	"CLOSE",
 	"SYN_SENT2",
 };
+
+/* Trampoline code to use nf_mptcp_get_ptr_impl from external module only if
+ * loaded */
+struct module* nf_conntrack_mptcp_mod;
 EXPORT_SYMBOL(nf_conntrack_mptcp_mod);
-EXPORT_SYMBOL(nf_ct_mptcp_new);
+
+void (*nf_ct_mptcp_new_implptr)(const struct tcphdr *th, struct nf_conn *ct);
+EXPORT_SYMBOL(nf_ct_mptcp_new_implptr);
+
+/* if module is loaded and implptr is not NULL, the module code can be called
+ * */
+void nf_ct_mptcp_new(const struct tcphdr *th, struct nf_conn *ct) 
+{
+	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_new_implptr) {
+		(*nf_ct_mptcp_new_implptr)(th, ct);
+		module_put(nf_conntrack_mptcp_mod);
+	}
+}
 
 #define SECS * HZ
 #define MINS * 60 SECS
