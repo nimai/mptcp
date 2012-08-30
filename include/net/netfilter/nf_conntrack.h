@@ -135,7 +135,7 @@ struct nf_conn {
 	struct nf_conn_mptcp *mpmaster;
 
 	/* per data-level connection info */
-	struct mptcp_subflow_info subflow;
+/*	struct mptcp_subflow_info subflow;*/
 #endif
 
 	/* Extensions */
