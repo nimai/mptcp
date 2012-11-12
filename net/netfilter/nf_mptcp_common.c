@@ -46,3 +46,44 @@ struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
     return NULL;
 }
 EXPORT_SYMBOL(nf_mptcp_get_ptr);
+
+/* Get a pointer to the next (non-EOL/NOP) option in the TCP header.
+ * hptr is a pointer to a valid TCP option
+ * Return NULL if no more option in the header */
+u8 *nf_mptcp_get_next_opt(const struct tcphdr *th, const u8 *hptr)
+{
+	u8 *ptr = hptr;
+	int length = (th->doff * 4) - (ptr-th);
+	while (length > 0) {
+		int opcode = *ptr++;
+		int opsize;
+
+        switch (opcode) {
+        case TCPOPT_EOL:
+            return NULL;
+        case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
+            length--;
+            continue;
+        default:
+			opsize = *ptr++;
+			if (opsize < 2) /* "silly options" */
+				return NULL;
+			if (opsize > length)
+				return NULL;	/* don't parse partial options */
+            return ptr-2;
+        }
+    }
+    return NULL;
+}
+
+/* Same as next_opt but returns only the MPTCP options */
+u8 *nf_mptcp_get_next(const struct tcphdr *th, const u8 *hptr)
+{
+	u8 *opt, *ptr = hptr;
+	while ((opt = nf_mptcp_get_next_opt(th, (const u8)ptr)) != NULL) {
+		if (*opt == TCPOPT_MPTCP)
+			return opt;
+		ptr = opt;
+	}
+	return NULL;
+}

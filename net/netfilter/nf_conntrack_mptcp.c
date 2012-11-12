@@ -74,6 +74,200 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 /* End of hashtable implem */
 
 
+/* Finite State Machine setup */
+enum mptcp_conntrack {
+	MPTCP_CONNTRACK_NONE,
+	MPTCP_CONNTRACK_SYN_SENT,
+	MPTCP_CONNTRACK_SYN_SENT2,
+	MPTCP_CONNTRACK_SYN_RECV,
+	MPTCP_CONNTRACK_ESTABLISHED,
+	MPTCP_CONNTRACK_FALLBACK,
+	MPTCP_CONNTRACK_FINWAIT1,
+	MPTCP_CONNTRACK_FINWAIT2,
+	MPTCP_CONNTRACK_TIMEWAIT,
+	MPTCP_CONNTRACK_CLOSEWAIT1,
+	MPTCP_CONNTRACK_CLOSEWAIT2,
+	MPTCP_CONNTRACK_LASTACK,
+	MPTCP_CONNTRACK_CLOSED,
+	MPTCP_CONNTRACK_MAX,
+	MPTCP_CONNTRACK_IGNORE
+}
+
+/* Define states' names  TODO */ 
+static const char *const mptcp_conntrack_names[] = {
+	"M_NONE",
+	"M_SYN_SENT",
+	"M_SYN_SENT2",
+	"M_SYN_RECV",
+	"M_ESTABLISHED",
+	"M_FALLBACK",
+	"M_FINWAIT1",
+	"M_FINWAIT2",
+	"M_TIMEWAIT",
+	"M_CLOSEWAIT1",
+	"M_CLOSEWAIT2",
+	"M_LASTACK",
+	"M_CLOSED"
+};
+
+#define sMNO MPTCP_CONNTRACK_NONE
+#define sMSS MPTCP_CONNTRACK_SYN_SENT
+#define sMS2 MPTCP_CONNTRACK_SYN_SENT2
+#define	sMSR MPTCP_CONNTRACK_SYN_RECV
+#define sMES MPTCP_CONNTRACK_ESTABLISHED
+#define sMFB MPTCP_CONNTRACK_FALLBACK
+#define sMFW MPTCP_CONNTRACK_FINWAIT1
+#define sMF2 MPTCP_CONNTRACK_FINWAIT2
+#define sMTW MPTCP_CONNTRACK_TIMEWAIT
+#define sMCW MPTCP_CONNTRACK_CLOSEWAIT1
+#define sMC2 MPTCP_CONNTRACK_CLOSEWAIT2
+#define sMLA MPTCP_CONNTRACK_LASTACK
+#define sMCL MPTCP_CONNTRACK_CLOSED
+#define sMIV MPTCP_CONNTRACK_MAX
+#define sMIG MPTCP_CONNTRACK_IGNORE
+
+#define sNO sMNO
+#define sSS sMSS
+#define sSR sMSR
+#define sES sMES
+#define sFW sMFW
+#define sCW sMCW
+#define sLA sMLA
+#define sTW sMTW
+#define sCL sMCL
+#define sS2 sMS2
+#define sIV sMIV
+#define sIG sMIG
+
+/* Possible packet types related to MPTCP connection */
+enum mptcp_pkt_type {
+	MPTCP_CAP_SYN,
+	MPTCP_CAP_SYNACK,
+	MPTCP_CAP_ACK,
+	MPTCP_JOIN_SYN,
+	MPTCP_JOIN_SYNACK,
+	MPTCP_JOIN_ACK,
+	MPTCP_DATA_FIN,
+	MPTCP_DATA_ACKFIN,
+	MPTCP_DATA_ACK,
+	MPTCP_FAIL,
+	MPTCP_NOOPT,
+/*	MPTCP_SUB_FIN,*/
+	MPTCP_PKT_INDEX_MAX,
+};
+	
+
+/* STATES from the FSM
+ *
+ * INVALID and IGNORED: states for invalid packets and possibly invalid,
+ * respectively
+ *
+ * M_NONE:		initial state
+ * M_SYN_SENT:	MPCAP_SYN packet seen
+ * M_SYN_SENT2:	MPCAP_SYN packet seen from reply dir, simultaneous open
+ * M_SYN_RECV:	MPCAP_SYNACK packet seen
+ * M_ESTABLISHED:	MPCAP_ACK packet seen and valid
+ * M_FALLBACK:	checksum, key exchange, token or hash not valid
+ * M_FINWAIT1:	MPTCP CLOSE demanded
+ * M_FINWAIT2: Closing all subflows and rcvd DATA_ACK+FIN
+ * M_TIMEWAIT:	waiting for subflows to be closed
+ * M_CLOSEWAIT1:	simultaneous closing: DATA_FIN rcvd and sent
+ * M_CLOSEWAIT2:	received DATA_FIN
+ * M_LASTACK:	waiting for last ack
+ * M_CLOSED:	connection closed, mptcp pcb deleted
+ */
+
+/* Return the index of the packet-type corresponding to the packet seen
+ * This refers to a value from enum mptcp_pkt_type */
+static unsigned int get_conntrack_index(const struct tcphdr *tcph)
+{
+	struct mptcp_option *mp;
+	int opsize;
+
+    u8 *opt = (__u8*)(tcph + 1); /* skip the common tcp header */
+	/* iterates over the mptcp options until one matching packet-type is found */
+	while (opt = nf_mptcp_get_next(tcph, opt)) {
+		mp = opt;
+
+		switch (mp->sub) {
+		case MPTCP_SUB_JOIN:
+			if (tcph->syn) return (tcph->ack ? MPTCP_JOIN_SYNACK : MPTCP_JOIN_SYN);
+			else if (tcph->ack) return MPTCP_JOIN_ACK;
+		case MPTCP_SUB_CAPABLE:
+			if (tcph->syn) return (tcph->ack ? MPTCP_CAP_SYNACK : MPTCP_CAP_SYN);
+			else if (tcph->ack) return MPTCP_CAP_ACK;
+		case MPTCP_SUB_DSS:
+			struct mp_dss *mpdss = (struct mp_dss*)mp;
+			if (mpdss->A) return (mpdss->F ? MPTCP_DATA_ACKFIN : MPTCP_DATA_ACK);
+			else if (mpdss->F) return MPTCP_DATA_FIN;
+		case MPTCP_SUB_FAIL:
+			if (tcph->rst) return MPTCP_FAIL;
+		}
+	}
+	return MPTCP_NOOPT;
+}
+
+/* MPTCP state transition table */
+static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = {
+	{
+/* ORIGINAL DIR */
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+/* CAPsyn */	{sMSS, sMSS, sMS2, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG,
+				sMIG, sMIG, sMIG },
+/*
+ *	sMNO -> sMSS	Initialize a new connection
+ *	sMSS -> sMSS	Retransmitted SYN
+ *	sMS2 -> sMS2	Late retransmitted SYN
+ *	sMSR -> sMIG
+ *	sMES -> sMIG	Error: SYNs in window outside the SYN_SENT state
+ *			are errors. Receiver will reply with RST
+ *			and close the connection.
+ *			Or we are not in sync and hold a dead connection.
+ *	sMFW -> sMIG
+ *	sMCW -> sMIG
+ *	sMLA -> sMIG
+ *	sMTW -> sMIG	Reopening a MPTCP connection is meaningless
+ *	sMCL -> sMIG
+ *
+ *	sMFB -> sMIG
+ *	sMF2 -> sMIG
+ *  sMC2 -> sMIG
+ *	*/
+
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+/* DataFIN */	{sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG,
+				sMIG, sMIG, sMIG },
+
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+/* DataACKFIN */ {},
+
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+/* DataACK */	{},
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
+ *		        sMC2, sMLA, sMCL }*/
+
+
+	},
+	{
+/* REPLY DIR */
+	}
+ };
+
+/* Per subflow FSM (for JOIN)
+ * J_NONE:		initial state 
+ * J_SYN_SENT:	MPJOIN_SYN packet seen and valid
+ * J_SYN_SENT2:	MPJOIN_SYN packet seen from reply dir, sim open
+ * J_SYN_RECV:	MPJOIN_SYNACK packet seen and valid
+ * J_ACK_RECV:	last MPJOIN_ACK packet seen	
+ * J_ESTABLISHED:	MPJOIN_ACK seen and valid
+ * J_CLOSED: */
+
 
 /* Search for the JOIN subkind in a MPTCP segment 
  * Inspired by tcp_parse_options() from tcp-input.c
@@ -332,6 +526,7 @@ void nf_ct_mptcp_packet(const struct tcphdr *th, struct nf_conn *ct,
 
 }
 #if 0
+/* FOR EXTENSION HELPER -- not used */
 static int help(struct sk_buff *skb,
 		unsigned int l4protoff,
 		struct nf_conn *ct,
@@ -423,6 +618,7 @@ static int __init nf_conntrack_mptcp_init(void)
 
 module_init(nf_conntrack_mptcp_init);
 #endif
+
 static int __init nf_conntrack_mptcp_init(void)
 {
 	int i;
