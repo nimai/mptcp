@@ -20,11 +20,12 @@ struct nf_conn_mptcp {
 	__u64 key[IP_CT_DIR_MAX]; 
 	__u32 token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
     struct list_head collide_tk; /* item of hash tables */ 
-	bool confirmed;
+	enum mptcp_ct_state state;
 };
 
 struct mptcp_subflow_info {
 	__u32 nonce[IP_CT_DIR_MAX];
+	enum mpjoin_ct_state state;
 };
 
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
@@ -37,6 +38,43 @@ u32 nf_mptcp_get_token(const struct tcphdr *th);
 
 struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th);
 
+
+/* Finite State Machine setup */
+enum mptcp_ct_state {
+	MPTCP_CONNTRACK_NONE,
+	MPTCP_CONNTRACK_SYN_SENT,
+	MPTCP_CONNTRACK_SYN_SENT2,
+	MPTCP_CONNTRACK_SYN_RECV,
+	MPTCP_CONNTRACK_ESTABLISHED,
+	MPTCP_CONNTRACK_FALLBACK,
+	MPTCP_CONNTRACK_FINWAIT,
+	MPTCP_CONNTRACK_TIMEWAIT,
+	MPTCP_CONNTRACK_CLOSEWAIT,
+	MPTCP_CONNTRACK_LASTACK,
+	MPTCP_CONNTRACK_CLOSED,
+	MPTCP_CONNTRACK_MAX,
+	MPTCP_CONNTRACK_IGNORE
+}
+
+/* Per subflow FSM (for JOIN)
+ * special state ACK_RECV:	last MPJOIN_ACK packet seeen	
+*/
+enum mpsubflow_ct_state {
+	MPJOIN_CONNTRACK_NONE,
+	MPJOIN_CONNTRACK_SYN_SENT,
+	MPJOIN_CONNTRACK_SYN_SENT2,
+	MPJOIN_CONNTRACK_ACK_RECV,
+	MPJOIN_CONNTRACK_SYN_RECV,
+	MPJOIN_CONNTRACK_ESTABLISHED,
+	MPJOIN_CONNTRACK_FALLBACK,
+	MPJOIN_CONNTRACK_FINWAIT,
+	MPJOIN_CONNTRACK_TIMEWAIT,
+	MPJOIN_CONNTRACK_CLOSEWAIT,
+	MPJOIN_CONNTRACK_LASTACK,
+	MPJOIN_CONNTRACK_CLOSED,
+	MPJOIN_CONNTRACK_MAX,
+	MPJOIN_CONNTRACK_IGNORE
+}
 
 
 #if 0 

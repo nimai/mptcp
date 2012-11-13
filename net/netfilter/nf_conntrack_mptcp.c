@@ -74,24 +74,6 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 /* End of hashtable implem */
 
 
-/* Finite State Machine setup */
-enum mptcp_conntrack {
-	MPTCP_CONNTRACK_NONE,
-	MPTCP_CONNTRACK_SYN_SENT,
-	MPTCP_CONNTRACK_SYN_SENT2,
-	MPTCP_CONNTRACK_SYN_RECV,
-	MPTCP_CONNTRACK_ESTABLISHED,
-	MPTCP_CONNTRACK_FALLBACK,
-	MPTCP_CONNTRACK_FINWAIT1,
-	MPTCP_CONNTRACK_FINWAIT2,
-	MPTCP_CONNTRACK_TIMEWAIT,
-	MPTCP_CONNTRACK_CLOSEWAIT1,
-	MPTCP_CONNTRACK_CLOSEWAIT2,
-	MPTCP_CONNTRACK_LASTACK,
-	MPTCP_CONNTRACK_CLOSED,
-	MPTCP_CONNTRACK_MAX,
-	MPTCP_CONNTRACK_IGNORE
-}
 
 /* Define states' names  TODO */ 
 static const char *const mptcp_conntrack_names[] = {
@@ -101,11 +83,9 @@ static const char *const mptcp_conntrack_names[] = {
 	"M_SYN_RECV",
 	"M_ESTABLISHED",
 	"M_FALLBACK",
-	"M_FINWAIT1",
-	"M_FINWAIT2",
+	"M_FINWAIT",
 	"M_TIMEWAIT",
-	"M_CLOSEWAIT1",
-	"M_CLOSEWAIT2",
+	"M_CLOSEWAIT",
 	"M_LASTACK",
 	"M_CLOSED"
 };
@@ -116,11 +96,9 @@ static const char *const mptcp_conntrack_names[] = {
 #define	sMSR MPTCP_CONNTRACK_SYN_RECV
 #define sMES MPTCP_CONNTRACK_ESTABLISHED
 #define sMFB MPTCP_CONNTRACK_FALLBACK
-#define sMFW MPTCP_CONNTRACK_FINWAIT1
-#define sMF2 MPTCP_CONNTRACK_FINWAIT2
+#define sMF2 MPTCP_CONNTRACK_FINWAIT
 #define sMTW MPTCP_CONNTRACK_TIMEWAIT
-#define sMCW MPTCP_CONNTRACK_CLOSEWAIT1
-#define sMC2 MPTCP_CONNTRACK_CLOSEWAIT2
+#define sMC2 MPTCP_CONNTRACK_CLOSEWAIT
 #define sMLA MPTCP_CONNTRACK_LASTACK
 #define sMCL MPTCP_CONNTRACK_CLOSED
 #define sMIV MPTCP_CONNTRACK_MAX
@@ -147,10 +125,15 @@ enum mptcp_pkt_type {
 	MPTCP_JOIN_SYN,
 	MPTCP_JOIN_SYNACK,
 	MPTCP_JOIN_ACK,
+	MPTCP_SUBFLOW_ACK,
+	MPTCP_SUBFLOW_FIN,
+	MPTCP_SUBFLOW_FINACK,
+	MPTCP_SUBFLOW_RST,
 	MPTCP_DATA_FIN,
 	MPTCP_DATA_ACKFIN,
 	MPTCP_DATA_ACK,
 	MPTCP_FAIL,
+	MPTCP_FASTCLOSE,
 	MPTCP_NOOPT,
 /*	MPTCP_SUB_FIN,*/
 	MPTCP_PKT_INDEX_MAX,
@@ -185,7 +168,19 @@ static enum mptcp_pkt_type _get_conntrack_index(const struct tcphdr *tcph,
 {
 	int opsize;
 
-    u8 *opt = (__u8*)(tcph + 1); /* skip the common tcp header */
+	if (tcph->fin) {
+		/* in a TCP FIN segment, no other MPTCP option than DSS should be
+		 * present */
+		*mp = nf_mptcp_get_next(tcph, opt);
+		if (tcph->ack) return MPTCP_SUBFLOW_FINACK;
+		return MPTCP_SUBFLOW_FIN;
+	} else if (tcph->rst) {
+		/* idem */
+		*mp = nf_mptcp_get_next(tcph, opt);
+		return MPTCP_SUBFLOW_RST;
+	}
+		
+	u8 *opt = (__u8*)(tcph + 1); /* skip the common tcp header */
 	/* iterates over the mptcp options until one matching packet-type is found */
 	while (opt = nf_mptcp_get_next(tcph, opt)) {
 		*mp = opt;
@@ -197,15 +192,21 @@ static enum mptcp_pkt_type _get_conntrack_index(const struct tcphdr *tcph,
 		case MPTCP_SUB_CAPABLE:
 			if (tcph->syn) return (tcph->ack ? MPTCP_CAP_SYNACK : MPTCP_CAP_SYN);
 			else if (tcph->ack) return MPTCP_CAP_ACK;
+		case MPTCP_SUB_FAIL:
+			return MPTCP_FAIL;
+		case MPTCP_SUB_FCLOSE:
+			return MPTCP_FASTCLOSE;
 		case MPTCP_SUB_DSS:
 			struct mp_dss *mpdss = (struct mp_dss*)*mp;
 			if (mpdss->A) return (mpdss->F ? MPTCP_DATA_ACKFIN : MPTCP_DATA_ACK);
 			else if (mpdss->F) return MPTCP_DATA_FIN;
-		case MPTCP_SUB_FAIL:
-			if (tcph->rst) return MPTCP_FAIL;
+		default:
+			break;
 		}
 	}
 	*mp = NULL;
+	if (tcph->ack)
+		return MPTCP_SUBFLOW_ACK;
 	return MPTCP_NOOPT;
 }
 
@@ -350,27 +351,20 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 };
 
 
-/* Per subflow FSM (for JOIN)
- * J_NONE:		initial state 
- * J_SYN_SENT:	MPJOIN_SYN packet seen and valid
- * J_SYN_SENT2:	MPJOIN_SYN packet seen from reply dir, sim open
- * J_SYN_RECV:	MPJOIN_SYNACK packet seen and valid
- * J_ACK_RECV:	last MPJOIN_ACK packet seen	
- * J_ESTABLISHED:	MPJOIN_ACK seen and valid
- * J_CLOSED: */
 
 
 /* Search for the JOIN subkind in a MPTCP segment 
- * Inspired by tcp_parse_options() from tcp-input.c
  * Return a pointer to the JOIN subtype in the skb
  * or NULL if it can't be found 
  * */
 struct mp_join *nf_mptcp_find_join(const struct tcphdr *th)
 {
 	struct mptcp_option *mp;
-	/* TODO: use get_next() */
-	if ((mp = nf_mptcp_get_ptr(th))->sub == MPTCP_SUB_JOIN)
-		return (struct mp_join*)((__u8*)mp-2);
+    u8 *opt = (__u8*)(tcph + 1); /* skip the common tcp header */
+	/* iterates over the mptcp options */
+	while (opt = nf_mptcp_get_next(tcph, opt))
+		if (opt->sub == MPTCP_SUB_JOIN)
+			return (struct mp_join*)((__u8*)opt-2);
 
 	return NULL;
 }
@@ -454,7 +448,7 @@ void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn)
 static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th, 
 		struct nf_conn_mptcp mpct)
 {
-	enum mptcp_conntrack new_state;
+	enum mptcp_ct_state new_state;
 	u32 token;
 	u64 key, isdn;
 	struct nf_conn_mptcp *mpct;
@@ -487,9 +481,11 @@ static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th,
 		mpct->token[0] = token;
 		nf_mptcp_hash_insert(mpct, token);
 		/* Keep a ref to master mptcp connnection in every nf_conn */
-		ct->mpmaster = mpct; /* FIXME */
+		ct->proto.tcp.mpmaster = mpct;
 	}
-
+	
+	mpct->state = new_state;
+	
 
 }
 
@@ -506,25 +502,23 @@ static bool mpjoin_new(struct nf_conn *ct, struct tcphdr *th)
 		return false;
 
 	/* Is this a subflow of an existing MultipathTCP connection ? */
-    /* TODO: EXPECTED -> NEW_SUBFLOW ? */
-	switch (mptr->sub) {
-	case MPTCP_SUB_JOIN:
-		token = __nf_mptcp_get_token((struct mp_join*)mptr);
-		/* if we find an existing valid mptcp connection matching 
-		 * this conn's token
-		 * for the original direction, it is highly probable that the
-		 * sender is an end-host of that mptcp connection. */
-		mpct = nf_mptcp_hash_find(token);
-		if (mpct && mpct->confirmed) {
-			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
-			/* mark as RELATED */
-			__set_bit(IPS_EXPECTED_BIT, &ct->status);
-		}
-		else {
-			pr_debug("conntrack: unexpected token in mp_join segment, ct=%p\n",ct);
-			/* TODO: log */
-		}
-		break;
+	/* if we find an existing valid mptcp connection matching 
+	 * this conn's token
+	 * for the original direction, it is highly probable that the
+	 * sender is an end-host of that mptcp connection. */
+	token = __nf_mptcp_get_token((struct mp_join*)mptr);
+	mpct = nf_mptcp_hash_find(token);
+	/* the mptcp connection needs to be established before accepting any
+	 * new subflow */
+	if (mpct && mpct->state >= MPTCP_CONNTRACK_ESTABLISHED) {
+		pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
+		/* mark as RELATED */
+		__set_bit(IPS_EXPECTED_BIT, &ct->status);
+		ct->proto.tcp.mpmaster = mpct;
+	}
+	else {
+		pr_debug("conntrack: unexpected token in mp_join segment, ct=%p\n",ct);
+		/* TODO: log */
 	}
 
 }
@@ -552,9 +546,25 @@ void nf_ct_mptcp_new_impl(struct nf_conn *ct, struct tcphdr *th)
 	}
 }
 
+static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
+		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
+		struct mptcp_option *mptr)
+{
+	old_state = ct->proto.tcp.state;
+	dir = CTINFO2DIR(ctinfo);
+	index = get_conntrack_index(th);
+	new_state = tcp_conntracks[dir][index][old_state];
+	tuple = &ct->tuplehash[dir].tuple;
+}
+
+static int mpsubflow_packet(struct nf_conn *ct, const struct tcphdr *th,
+		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
+		struct mptcp_option *mptr)
+{
+}
 
 
-void nf_ct_mptcp_packet_impl(const struct tcphdr *th, struct nf_conn *ct,
+void nf_ct_mptcp_packet_impl(struct nf_conn *ct, const struct tcphdr *th,
 		enum ip_conntrack_info ctinfo)
 {
 	struct mptcp_option *mptr;
@@ -562,16 +572,29 @@ void nf_ct_mptcp_packet_impl(const struct tcphdr *th, struct nf_conn *ct,
 	u64 key, isdn;
 	struct nf_conn_mptcp *mpct;
 	enum ip_conntrack_dir dir;
+	struct nf_conntrack_tuple *tuple;
+	enum mptcp_ct_state new_state, old_state;
+	
+	/* no mpmaster for the connection
+	 * - MPCAP: possible only for SYN -> not here 
+	 * - Subflow: possible only for SYN too
+	 * no mpmaster <=> not part of mptcp conn */
+	if (!(mpct = ct->proto.tcp.mpmaster))
+		return; 
     
-	if (!(mptr = nf_mptcp_get_ptr(th)))
-		return; /* FIXME should not use NF_ACCEPT */
-
-	mpct = ct->mpmaster; 
-	switch (mptr->sub) {
-	case MPTCP_SUB_CAPABLE:
-		break;
-	case MPTCP_SUB_JOIN:
-		break;
+	switch (_get_conntrack_index(th, &mptr)) {
+		/* Subflow state not altered by all packet's types */
+	case MPTCP_JOIN_SYN:
+	case MPTCP_JOIN_SYNACK:
+	case MPTCP_JOIN_ACK:
+	case MPTCP_ACK:
+	case MPTCP_SUBFLOW_FIN:
+	case MPTCP_SUBFLOW_FINACK:
+	case MPTCP_SUBFLOW_RST:
+		mpsubflow_packet(ct, th, ctinfo, mpct, mptr);
+	default:
+		/* ...while every segment might affect the MPTCP connection */
+		mptcp_packet(ct, th, ctinfo, mpct, mptr);
 	}
 
 }
