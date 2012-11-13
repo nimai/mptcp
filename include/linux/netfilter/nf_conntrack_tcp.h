@@ -4,6 +4,11 @@
 
 #include <linux/types.h>
 
+#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
+	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#include <linux/netfilter/nf_conntrack_mptcp.h>
+#endif
+
 /* This is exposed to userspace (ctnetlink) */
 enum tcp_conntrack {
 	TCP_CONNTRACK_NONE,
@@ -69,6 +74,15 @@ struct ip_ct_tcp {
 	/* For SYN packets while we may be out-of-sync */
 	u_int8_t	last_wscale;	/* Last window scaling factor seen */
 	u_int8_t	last_flags;	/* Last flags set */
+#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
+	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+	/* Reference to the mptcp connection structure */
+	struct nf_conn_mptcp *mpmaster;
+
+	/* per data-level connection info */
+/*	struct mptcp_subflow_info subflow;*/
+#endif
+#endif /* CONFIG_NF_CONNTRACK_MPTCP */
 };
 
 #endif /* __KERNEL__ */

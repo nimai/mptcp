@@ -178,16 +178,17 @@ enum mptcp_pkt_type {
  */
 
 /* Return the index of the packet-type corresponding to the packet seen
- * This refers to a value from enum mptcp_pkt_type */
-static unsigned int get_conntrack_index(const struct tcphdr *tcph)
+ * This refers to a value from enum mptcp_pkt_type 
+ * Set a pointer mp to the considered option start address */
+static enum mptcp_pkt_type _get_conntrack_index(const struct tcphdr *tcph, 
+		struct mptcp_option **mp)
 {
-	struct mptcp_option *mp;
 	int opsize;
 
     u8 *opt = (__u8*)(tcph + 1); /* skip the common tcp header */
 	/* iterates over the mptcp options until one matching packet-type is found */
 	while (opt = nf_mptcp_get_next(tcph, opt)) {
-		mp = opt;
+		*mp = opt;
 
 		switch (mp->sub) {
 		case MPTCP_SUB_JOIN:
@@ -197,67 +198,157 @@ static unsigned int get_conntrack_index(const struct tcphdr *tcph)
 			if (tcph->syn) return (tcph->ack ? MPTCP_CAP_SYNACK : MPTCP_CAP_SYN);
 			else if (tcph->ack) return MPTCP_CAP_ACK;
 		case MPTCP_SUB_DSS:
-			struct mp_dss *mpdss = (struct mp_dss*)mp;
+			struct mp_dss *mpdss = (struct mp_dss*)*mp;
 			if (mpdss->A) return (mpdss->F ? MPTCP_DATA_ACKFIN : MPTCP_DATA_ACK);
 			else if (mpdss->F) return MPTCP_DATA_FIN;
 		case MPTCP_SUB_FAIL:
 			if (tcph->rst) return MPTCP_FAIL;
 		}
 	}
+	*mp = NULL;
 	return MPTCP_NOOPT;
+}
+
+static enum mptcp_pkt_type get_conntrack_index(const struct tcphdr *tcph)
+{
+	struct mptcp_option *mp;
+	return _get_conntrack_index(tcph, &mp);
 }
 
 /* MPTCP state transition table */
 static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = {
 	{
-/* ORIGINAL DIR */
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-/* CAPsyn */	{sMSS, sMSS, sMS2, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG,
-				sMIG, sMIG, sMIG },
+/* ORIGINAL */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*syn*/	   { sSS, sSS, sIG, sIG, sIG, sIG, sIG, sSS, sSS, sS2 },
 /*
- *	sMNO -> sMSS	Initialize a new connection
- *	sMSS -> sMSS	Retransmitted SYN
- *	sMS2 -> sMS2	Late retransmitted SYN
- *	sMSR -> sMIG
- *	sMES -> sMIG	Error: SYNs in window outside the SYN_SENT state
+ *	sNO -> sSS	Initialize a new connection
+ *	sSS -> sSS	Retransmitted SYN
+ *	sS2 -> sS2	Late retransmitted SYN
+ *	sSR -> sIG
+ *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
  *			are errors. Receiver will reply with RST
  *			and close the connection.
  *			Or we are not in sync and hold a dead connection.
- *	sMFW -> sMIG
- *	sMCW -> sMIG
- *	sMLA -> sMIG
- *	sMTW -> sMIG	Reopening a MPTCP connection is meaningless
- *	sMCL -> sMIG
- *
- *	sMFB -> sMIG
- *	sMF2 -> sMIG
- *  sMC2 -> sMIG
- *	*/
-
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-/* DataFIN */	{sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG,
-				sMIG, sMIG, sMIG },
-
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-/* DataACKFIN */ {},
-
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-/* DataACK */	{},
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-/*		        {sMNO, sMSS, sMS2, sMSR, sMES, sMFB, sMFW, sMF2, sMTW, sMCW, 
- *		        sMC2, sMLA, sMCL }*/
-
-
+ *	sFW -> sIG
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sSS	Reopened connection (RFC 1122).
+ *	sCL -> sSS
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*synack*/ { sIV, sIV, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*
+ *	sNO -> sIV	Too late and no reason to do anything
+ *	sSS -> sIV	Client can't send SYN and then SYN/ACK
+ *	sS2 -> sSR	SYN/ACK sent to SYN2 in simultaneous open
+ *	sSR -> sIG
+ *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
+ *			are errors. Receiver will reply with RST
+ *			and close the connection.
+ *			Or we are not in sync and hold a dead connection.
+ *	sFW -> sIG
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sIG
+ *	sCL -> sIG
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*
+ *	sNO -> sIV	Too late and no reason to do anything...
+ *	sSS -> sIV	Client migth not send FIN in this state:
+ *			we enforce waiting for a SYN/ACK reply first.
+ *	sS2 -> sIV
+ *	sSR -> sFW	Close started.
+ *	sES -> sFW
+ *	sFW -> sLA	FIN seen in both directions, waiting for
+ *			the last ACK.
+ *			Migth be a retransmitted FIN as well...
+ *	sCW -> sLA
+ *	sLA -> sLA	Retransmitted FIN. Remain in the same state.
+ *	sTW -> sTW
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*ack*/	   { sES, sIV, sES, sES, sCW, sCW, sTW, sTW, sCL, sIV },
+/*
+ *	sNO -> sES	Assumed.
+ *	sSS -> sIV	ACK is invalid: we haven't seen a SYN/ACK yet.
+ *	sS2 -> sIV
+ *	sSR -> sES	Established state is reached.
+ *	sES -> sES	:-)
+ *	sFW -> sCW	Normal close request answered by ACK.
+ *	sCW -> sCW
+ *	sLA -> sTW	Last ACK detected.
+ *	sTW -> sTW	Retransmitted last ACK. Remain in the same state.
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
+/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
 	},
 	{
-/* REPLY DIR */
+/* REPLY */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*syn*/	   { sIV, sS2, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sS2 },
+/*
+ *	sNO -> sIV	Never reached.
+ *	sSS -> sS2	Simultaneous open
+ *	sS2 -> sS2	Retransmitted simultaneous SYN
+ *	sSR -> sIV	Invalid SYN packets sent by the server
+ *	sES -> sIV
+ *	sFW -> sIV
+ *	sCW -> sIV
+ *	sLA -> sIV
+ *	sTW -> sIV	Reopened connection, but server may not do it.
+ *	sCL -> sIV
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*synack*/ { sIV, sSR, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*
+ *	sSS -> sSR	Standard open.
+ *	sS2 -> sSR	Simultaneous open
+ *	sSR -> sIG	Retransmitted SYN/ACK, ignore it.
+ *	sES -> sIG	Late retransmitted SYN/ACK?
+ *	sFW -> sIG	Might be SYN/ACK answering ignored SYN
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sIG
+ *	sCL -> sIG
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*
+ *	sSS -> sIV	Server might not send FIN in this state.
+ *	sS2 -> sIV
+ *	sSR -> sFW	Close started.
+ *	sES -> sFW
+ *	sFW -> sLA	FIN seen in both directions.
+ *	sCW -> sLA
+ *	sLA -> sLA	Retransmitted FIN.
+ *	sTW -> sTW
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*ack*/	   { sIV, sIG, sSR, sES, sCW, sCW, sTW, sTW, sCL, sIG },
+/*
+ *	sSS -> sIG	Might be a half-open connection.
+ *	sS2 -> sIG
+ *	sSR -> sSR	Might answer late resent SYN.
+ *	sES -> sES	:-)
+ *	sFW -> sCW	Normal close request answered by ACK.
+ *	sCW -> sCW
+ *	sLA -> sTW	Last ACK detected.
+ *	sTW -> sTW	Retransmitted last ACK.
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
+/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
 	}
- };
+};
+
 
 /* Per subflow FSM (for JOIN)
  * J_NONE:		initial state 
@@ -277,102 +368,14 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 struct mp_join *nf_mptcp_find_join(const struct tcphdr *th)
 {
 	struct mptcp_option *mp;
-
+	/* TODO: use get_next() */
 	if ((mp = nf_mptcp_get_ptr(th))->sub == MPTCP_SUB_JOIN)
 		return (struct mp_join*)((__u8*)mp-2);
 
 	return NULL;
 }
 
-#if 0
-struct mp_join *mptcp_find_joinv2(struct tcphdr *th) 
-{
-	__u8 *ptr;
-	int length = (th->doff * 4) - sizeof(struct tcphdr);
 
-	/* Jump through the options to check whether JOIN is there */
-	ptr = (__u8*)(th + 1);
-	while (length > 0) {
-		int opcode = *ptr++;
-		int opsize;
-
-		switch (opcode) {
-		case TCPOPT_EOL:
-			return NULL;
-		case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
-			length--;
-			continue;
-		default:
-			opsize = *ptr++;			if (opsize < 2)	/* "silly options" */
-				return NULL;
-			if (opsize > length)
-				return NULL;  /* don't parse partial options */
-			if (opcode == TCPOPT_MPTCP &&
-			    ((struct mptcp_option *)(ptr-2))->sub == MPTCP_SUB_JOIN) {
-				return (struct mp_join *)(ptr-2);
-			}
-			ptr += opsize - 2;
-			length -= opsize;
-		}
-	}
-	return NULL;
-}
-#endif
-
-
-/* Look for the presence of MPTCP in the set of TCP options from a given
- * TCP packet pointed by th.
- * Inspired by tcp_parse_options() from tcp-input.c
- * Return a pointer to the option in the skb
- * or NULL if it can't be found.
- */
-#if 0
-struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
-{
-    __u8 *ptr;
-	int length = (th->doff * 4) - sizeof(struct tcphdr);
-    
-    /*
-    char *dbgstr;
-    printk(KERN_DEBUG "tcp header:\n"
-            "source: %u dest: %u\n"
-            "offset: %u window: %u\n\n", th->source, th->dest,
-            th->doff, th->window);
-    dbgstr = format_stack_bytes((unsigned char*)th, 80))    
-    printk(KERN_DEBUG "%s", dbgstr);
-    kfree(dbgstr);
-    */
-
-    ptr = (__u8*)(th + 1); /* skip the common tcp header */
-    printk(KERN_DEBUG "find_mptcp_option: length=%i, opcode=%i\n", length, *ptr);
-
-	while (length > 0) {
-		int opcode = *ptr++;
-		int opsize;
-
-        switch (opcode) {
-        case TCPOPT_EOL:
-            return NULL;
-        case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
-            length--;
-            continue;
-        default:
-			opsize = *ptr++;
-            printk(KERN_DEBUG "find_mptcp_option: opsize = %i\n", opsize);
-			if (opsize < 2) /* "silly options" */
-				return NULL;
-			if (opsize > length)
-				return NULL;	/* don't parse partial options */
-			if (opcode == TCPOPT_MPTCP)
-                return (struct mptcp_option*)(ptr-2);
-            ptr += opsize-2;
-		    length -= opsize;
-        }
-    }
-    /* no mptcp option has been found after the whole parsing */
-    return NULL;
-}
-#endif 
 
 /* Get the token from a mp_join structure from a SYN packet */
 static inline __u32 __nf_mptcp_get_token(struct mp_join *mpj)
@@ -448,18 +451,60 @@ void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn)
 }
 
 
-/* Called at the end of the proto handling for new TCP packets (new connections) */
 
-void nf_ct_mptcp_new_impl(const struct tcphdr *th,
-		struct nf_conn *ct)
+static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th, 
+		struct nf_conn_mptcp mpct)
 {
+	enum mptcp_conntrack new_state;
+	u32 token;
+	u64 key, isdn;
+	struct nf_conn_mptcp *mpct;
+	
+	/* verify if there exists an mptcp tracker for this packet */
+	key = __nf_mptcp_get_key((struct mp_capable*)mptr);
+	nf_mptcp_key_sha1(key, &token, &isdn);
+	mpct = nf_mptcp_hash_find(token);
+	if (mpct) {
+		/* this is not really a new mptcp connection, mptcp_packet will handle
+		 * it */
+		pr_debug("conntrack: unexpected mp_capable arrives for existing"
+				" mptcp connection %p, ct=%p\n",mpct, ct);
+		return false;
+	}
+	
+	new_state = mptcp_conntracks[0][get_conntrack_index(th)][MPTCP_CONNTRACK_NONE];
+
+	/* Invalid connection attempt */
+	if (new_state >= MPTCP_CONNTRACK_MAX) {
+		pr_debug("nf_ct_mptcp: invalid new connection attempt, deleting.\n");
+		return false;
+	}
+
+	if (new_state == MPTCP_CONNTRACK_SYN_SENT) {
+		/* client is trying to establish an MPTCP conn */
+		pr_debug("conntrack: new mptcp connection, ct=%p\n", ct);
+		mpct = kmalloc(sizeof(struct nf_conn_mptcp), GFP_KERNEL);
+		mpct->key[0] = key;
+		mpct->token[0] = token;
+		nf_mptcp_hash_insert(mpct, token);
+		/* Keep a ref to master mptcp connnection in every nf_conn */
+		ct->mpmaster = mpct; /* FIXME */
+	}
+
+
+}
+
+static bool mpjoin_new(struct nf_conn *ct, struct tcphdr *th)
+{
+	/* client is trying to establish a new subflow */
+			/* TODO: add subflow to mptcp struct */
 	struct mptcp_option *mptr;
 	u32 token;
 	u64 key, isdn;
 	struct nf_conn_mptcp *mpct;
     
 	if (!(mptr = nf_mptcp_get_ptr(th)))
-		return; /* return value ?*/
+		return false;
 
 	/* Is this a subflow of an existing MultipathTCP connection ? */
     /* TODO: EXPECTED -> NEW_SUBFLOW ? */
@@ -481,29 +526,36 @@ void nf_ct_mptcp_new_impl(const struct tcphdr *th,
 			/* TODO: log */
 		}
 		break;
-	
-	case MPTCP_SUB_CAPABLE:
-		key = __nf_mptcp_get_key((struct mp_capable*)mptr);
-		nf_mptcp_key_sha1(key, &token, &isdn);
-		mpct = nf_mptcp_hash_find(token);
-		if (mpct) {
-			pr_debug("conntrack: unexpected mp_capable arrives ct=%p\n",ct);
-		}
-		else {
-			pr_debug("conntrack: new mptcp connection, ct=%p\n", ct);
-			mpct = kmalloc(sizeof(struct nf_conn_mptcp), GFP_KERNEL);
-			mpct->key[0] = key;
-			mpct->token[0] = token;
-			mpct->confirmed = true; /* FIXME temporary */
-			nf_mptcp_hash_insert(mpct, token);
-			/* Keep a ref to master mptcp connnection in every nf_conn */
-			ct->mpmaster = mpct;
-		}
+	}
+
+}
+
+
+/* Called at the end of the proto handling for new TCP packets (new connections) */
+void nf_ct_mptcp_new_impl(struct nf_conn *ct, struct tcphdr *th)
+{
+	struct mptcp_option *mptr;
+    
+	if (!(mptr = nf_mptcp_get_ptr(th)))
+		return; /* no mptcp option present */
+
+	switch (_get_conntrack_index(th, &mptr)) {
+	case MPTCP_JOIN_SYN:
+		mpjoin_new(ct, th, mptr)
 		break;
+	case MPTCP_CAP_SYN:
+		mpcap_new(ct, th, mptr);
+		break;
+	default:
+		pr_debug("nf_ct_mptcp: unexpected mptcp option for connection or "
+				"subflow establishment, mpct %p, option subkind %hhi", mpct, mptr->kind);
+		return;
 	}
 }
 
-void nf_ct_mptcp_packet(const struct tcphdr *th, struct nf_conn *ct,
+
+
+void nf_ct_mptcp_packet_impl(const struct tcphdr *th, struct nf_conn *ct,
 		enum ip_conntrack_info ctinfo)
 {
 	struct mptcp_option *mptr;
@@ -524,100 +576,6 @@ void nf_ct_mptcp_packet(const struct tcphdr *th, struct nf_conn *ct,
 	}
 
 }
-#if 0
-/* FOR EXTENSION HELPER -- not used */
-static int help(struct sk_buff *skb,
-		unsigned int l4protoff,
-		struct nf_conn *ct,
-		enum ip_conntrack_info ctinfo)
-{
-	unsigned int dataoff, datalen;
-	const struct tcphdr *th;
-	struct tcphdr _tcph;
-	const char *fb_ptr;
-	int ret;
-	struct mptcp_option *mptr;
-	__u32 token;
-	__u64 key;
-	struct nf_conn_mptcp *ct_mptcp_info = &nfct_help(ct)->help.ct_mptcp_info;
-    
-	th = skb_header_pointer(skb, l4protoff, sizeof(_tcph), &_tcph);
-	if (th == NULL)
-		return NF_ACCEPT;
-
-	if (!(mptr = mptcp_get_ptr))
-		return NF_ACCEPT;
-
-	/* Is this a subflow of an existing MultipathTCP connection ? */
-    /* TODO: EXPECTED -> NEW_SUBFLOW */
-	switch (mptr->sub) {
-	case MPTCP_SUB_JOIN:
-		token = __mptcp_get_token((mp_join*)mptr);
-		/* if we find an existing conn matching this conn's token, 
-		 * mark the new connection as an expected one */
-		mptcp_conn = nf_mptcp_hash_find(token, ctinfo);
-		if (mptcp_conn) {
-			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
-			__set_bit(IPS_EXPECTED_BIT, &ct->status);
-		}
-		else {
-			pr_debug("conntrack: unexpected token in mp_join segment, ct=%p\n",ct);
-			/* TODO: log */
-		}
-		break;
-
-	case MPTCP_SUB_CAPABLE:
-		key = nf_mptcp_get_key((mp_capable*)mptr);
-		token = nf_mptcp_token_from_key(key);
-		mptcp_conn = nf_mptcp_hash_find(token, ctinfo);
-		if (mptcp_conn) {
-			pr_debug("conntrack: unexpected mp_capable arrives ct=%p\n",ct);
-		}
-		else {
-			pr_debug("conntrack: new mptcp connection, ct=%p\n",ct);
-			ct_mptcp_info = kmalloc(sizeof(nf_conn_mptcp), GFP_KERNEL);
-			ct_mptcp_info->key[ctinfo] = key;
-			ct_mptcp_info->token[ctinfo] = token;
-			nf_mptcp_hash_insert(ct_mptcp_info, token, ctinfo);
-		}
-		break;
-	}
-
-
-
-}
-/* helper structure */
-static struct nf_conntrack_helper mptcp_helper __read_mostly;
-
-static int nf_conntrack_mptcp_fini(void)
-{
-
-	pr_debug("nf_ct_mptcp: unregistering helper");
-	nf_conntrack_helper_unregister(&mptcp_helper);
-}
-
-
-static int __init nf_conntrack_mptcp_init(void)
-{
-	int i;
-	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
-		INIT_LIST_HEAD(&mptcp_token_htb[IP_CT_DIR_REPLY][i]);
-		INIT_LIST_HEAD(&mptcp_token_htb[IP_CT_DIR_ORIGINAL][i]);
-	}
-	rwlock_init(&tk_hash_lock);
-	
-	/* init conntrack helper struct */
-	mptcp_helper.tuple.dst.protonum = IPPROTO_TCP;
-	mptcp_helper.expect_policy = NULL;
-	mptcp_helper.me = THIS_MODULE;
-	mptcp_helper.help = help;
-
-    return 0;
-/*    FIXME: return value */
-}
-
-module_init(nf_conntrack_mptcp_init);
-#endif
 
 static int __init nf_conntrack_mptcp_init(void)
 {
