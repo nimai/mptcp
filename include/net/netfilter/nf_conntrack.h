@@ -22,7 +22,6 @@
 #include <linux/netfilter/nf_conntrack_dccp.h>
 #include <linux/netfilter/nf_conntrack_sctp.h>
 #include <linux/netfilter/nf_conntrack_proto_gre.h>
-#include <linux/netfilter/nf_conntrack_mptcp.h>
 #include <net/netfilter/ipv6/nf_conntrack_icmpv6.h>
 
 #include <net/netfilter/nf_conntrack_tuple.h>
@@ -127,15 +126,6 @@ struct nf_conn {
 
 #ifdef CONFIG_NF_CONNTRACK_SECMARK
 	u_int32_t secmark;
-#endif
-
-#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
-	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
-	/* Reference to the mptcp connection structure */
-	struct nf_conn_mptcp *mpmaster;
-
-	/* per data-level connection info */
-/*	struct mptcp_subflow_info subflow;*/
 #endif
 
 	/* Extensions */

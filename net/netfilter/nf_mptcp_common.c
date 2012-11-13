@@ -1,5 +1,13 @@
 #include <linux/netfilter/nf_conntrack_mptcp.h>
 
+
+/* Look for the presence of MPTCP in the set of TCP options from a given
+ * TCP packet pointed by th.
+ * Inspired by tcp_parse_options() from tcp-input.c
+ * Return a pointer to the option in the skb
+ * or NULL if it can't be found.
+ */
+
 struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
 {
     __u8 *ptr;
