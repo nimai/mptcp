@@ -66,15 +66,24 @@ static const char *const tcp_conntrack_names[] = {
 struct module* nf_conntrack_mptcp_mod;
 EXPORT_SYMBOL(nf_conntrack_mptcp_mod);
 
-void (*nf_ct_mptcp_new_implptr)(const struct tcphdr *th, struct nf_conn *ct);
+void (*nf_ct_mptcp_new_implptr)(struct nf_conn *ct, const struct tcphdr *th);
+void (*nf_ct_mptcp_packet_implptr)(struct nf_conn *ct, const struct tcphdr *th);
 EXPORT_SYMBOL(nf_ct_mptcp_new_implptr);
+EXPORT_SYMBOL(nf_ct_mptcp_packet_implptr);
 
 /* if module is loaded and implptr is not NULL, the module code can be called
  * */
-void nf_ct_mptcp_new(const struct tcphdr *th, struct nf_conn *ct) 
+void nf_ct_mptcp_new(struct nf_conn *ct, const struct tcphdr *th) 
 {
 	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_new_implptr) {
 		(*nf_ct_mptcp_new_implptr)(th, ct);
+		module_put(nf_conntrack_mptcp_mod);
+	}
+}
+void nf_ct_mptcp_packet(struct nf_conn *ct, const struct tcphdr *th) 
+{
+	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_packet_implptr) {
+		(*nf_ct_mptcp_packet_implptr)(th, ct);
 		module_put(nf_conntrack_mptcp_mod);
 	}
 }
