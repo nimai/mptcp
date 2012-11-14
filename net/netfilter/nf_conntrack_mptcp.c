@@ -550,17 +550,27 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
 		struct mptcp_option *mptr)
 {
-	old_state = ct->proto.tcp.state;
+	old_state = ct->proto.tcp.mpmaster.state;
 	dir = CTINFO2DIR(ctinfo);
 	index = get_conntrack_index(th);
 	new_state = tcp_conntracks[dir][index][old_state];
 	tuple = &ct->tuplehash[dir].tuple;
+		
+	pr_debug("nf_ct_mptcp_packet: received segmenttype %i, oldstate %s -> newstate %s\n",
+			index, mptcp_conntrack_names[old_state], mptcp_conntrack_names[new_state]);
+
+	switch (new_state) {
+	default:
+		break;
+	}
+	return 0;
 }
 
 static int mpsubflow_packet(struct nf_conn *ct, const struct tcphdr *th,
 		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
 		struct mptcp_option *mptr)
 {
+	return 0;
 }
 
 
@@ -582,6 +592,7 @@ void nf_ct_mptcp_packet_impl(struct nf_conn *ct, const struct tcphdr *th,
 	if (!(mpct = ct->proto.tcp.mpmaster))
 		return; 
     
+	/* FIXME: not sure about the dispatching */
 	switch (_get_conntrack_index(th, &mptr)) {
 		/* Subflow state not altered by all packet's types */
 	case MPTCP_JOIN_SYN:
@@ -616,6 +627,7 @@ static int __init nf_conntrack_mptcp_init(void)
 	/* trampoline init */
 	nf_conntrack_mptcp_mod = THIS_MODULE; 
 	nf_ct_mptcp_new_implptr = &nf_ct_mptcp_new_impl;
+	nf_ct_mptcp_packet_implptr = &nf_ct_mptcp_packet_impl;
 	
 	/* hashtable init */
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {
