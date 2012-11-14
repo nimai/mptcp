@@ -58,10 +58,12 @@ EXPORT_SYMBOL(nf_mptcp_get_ptr);
 /* Get a pointer to the next (non-EOL/NOP) option in the TCP header.
  * hptr is a pointer to a valid TCP option
  * Return NULL if no more option in the header */
-u8 *nf_mptcp_get_next_opt(const struct tcphdr *th, const u8 *hptr)
+u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr)
 {
 	u8 *ptr = hptr;
-	int length = (th->doff * 4) - (ptr-th);
+	/* length is the size of the rest of the TCP header from option pointed by
+	 * ptr to the end*/
+	int length = (th->doff * 4) - ((size_t)ptr-sizeof(struct tcphdr));
 	while (length > 0) {
 		int opcode = *ptr++;
 		int opsize;
@@ -83,15 +85,23 @@ u8 *nf_mptcp_get_next_opt(const struct tcphdr *th, const u8 *hptr)
     }
     return NULL;
 }
+EXPORT_SYMBOL(nf_mptcp_next_opt);
 
 /* Same as next_opt but returns only the MPTCP options */
-u8 *nf_mptcp_get_next(const struct tcphdr *th, const u8 *hptr)
+struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *hptr)
 {
 	u8 *opt, *ptr = hptr;
-	while ((opt = nf_mptcp_get_next_opt(th, (const u8)ptr)) != NULL) {
+	while ((opt = nf_mptcp_next_opt(th, ptr)) != NULL) {
 		if (*opt == TCPOPT_MPTCP)
-			return opt;
+			return (struct mptcp_option*)opt;
 		ptr = opt;
 	}
 	return NULL;
 }
+EXPORT_SYMBOL(nf_mptcp_next_mpopt);
+
+struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th)
+{
+	return nf_mptcp_next_mpopt(th, (u8*)((size_t)th+sizeof(struct tcphdr)));
+}
+EXPORT_SYMBOL(nf_mptcp_first_mpopt);

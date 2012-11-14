@@ -5,39 +5,8 @@
 #include <linux/tcp.h>
 #include <net/mptcp.h>
 #include <net/netfilter/nf_conntrack.h>
-/*#include <linux/netfilter/nf_conntrack_tuple_common.h>*/
+#include <linux/netfilter/nf_conntrack_tuple_common.h>
 #include <linux/module.h>
-
-/* MPTCP connection tracking helper */
-
-/* This structure exists only once per mptcp-level connection */
-struct nf_conn_mptcp {
-	/* Directions are relative to MP_CAPABLE SYN packet.
-	 * For data relative to a specific host:
-	 *	IP_CT_DIR_ORIGINAL: initiator host
-	 *	IP_CT_DIR_REPLY: receiver
-	 */
-	__u64 key[IP_CT_DIR_MAX]; 
-	__u32 token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
-    struct list_head collide_tk; /* item of hash tables */ 
-	enum mptcp_ct_state state;
-};
-
-struct mptcp_subflow_info {
-	__u32 nonce[IP_CT_DIR_MAX];
-	enum mpjoin_ct_state state;
-};
-
-struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
-void nf_mptcp_hash_insert(struct nf_conn_mptcp *mpconn, u32 token);
-void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
-
-
-struct mp_join *nf_mptcp_find_join(const struct tcphdr *th);
-u32 nf_mptcp_get_token(const struct tcphdr *th);
-
-struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th);
-
 
 /* Finite State Machine setup */
 enum mptcp_ct_state {
@@ -54,7 +23,7 @@ enum mptcp_ct_state {
 	MPTCP_CONNTRACK_CLOSED,
 	MPTCP_CONNTRACK_MAX,
 	MPTCP_CONNTRACK_IGNORE
-}
+};
 
 /* Per subflow FSM (for JOIN)
  * special state ACK_RECV:	last MPJOIN_ACK packet seeen	
@@ -74,7 +43,40 @@ enum mpsubflow_ct_state {
 	MPJOIN_CONNTRACK_CLOSED,
 	MPJOIN_CONNTRACK_MAX,
 	MPJOIN_CONNTRACK_IGNORE
-}
+};
+
+/* This structure exists only once per mptcp-level connection */
+struct nf_conn_mptcp {
+	/* Directions are relative to MP_CAPABLE SYN packet.
+	 * For data relative to a specific host:
+	 *	IP_CT_DIR_ORIGINAL: initiator host
+	 *	IP_CT_DIR_REPLY: receiver
+	 */
+	__u64 key[IP_CT_DIR_MAX]; 
+	__u32 token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
+    struct list_head collide_tk; /* item of hash tables */ 
+	enum mptcp_ct_state state;
+};
+
+struct mptcp_subflow_info {
+	__u32 nonce[IP_CT_DIR_MAX];
+	enum mpsubflow_ct_state state;
+};
+
+struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
+void nf_mptcp_hash_insert(struct nf_conn_mptcp *mpconn, u32 token);
+void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
+
+
+struct mp_join *nf_mptcp_find_join(const struct tcphdr *th);
+u32 nf_mptcp_get_token(const struct tcphdr *th);
+
+struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th);
+
+
+u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr);
+struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *hptr);
+struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th);
 
 
 #if 0 
