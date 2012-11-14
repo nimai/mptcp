@@ -81,7 +81,6 @@ struct ip_ct_tcp {
 
 	/* per data-level connection info */
 /*	struct mptcp_subflow_info subflow;*/
-#endif
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 };
 

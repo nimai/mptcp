@@ -76,14 +76,14 @@ EXPORT_SYMBOL(nf_ct_mptcp_packet_implptr);
 void nf_ct_mptcp_new(struct nf_conn *ct, const struct tcphdr *th) 
 {
 	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_new_implptr) {
-		(*nf_ct_mptcp_new_implptr)(th, ct);
+		(*nf_ct_mptcp_new_implptr)(ct, th);
 		module_put(nf_conntrack_mptcp_mod);
 	}
 }
 void nf_ct_mptcp_packet(struct nf_conn *ct, const struct tcphdr *th) 
 {
 	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_packet_implptr) {
-		(*nf_ct_mptcp_packet_implptr)(th, ct);
+		(*nf_ct_mptcp_packet_implptr)(ct, th);
 		module_put(nf_conntrack_mptcp_mod);
 	}
 }
@@ -1053,6 +1053,12 @@ static int tcp_packet(struct nf_conn *ct,
 		timeout = nf_ct_tcp_timeout_unacknowledged;
 	else
 		timeout = tcp_timeouts[new_state];
+
+#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
+	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+	nf_ct_mptcp_packet(ct, th);
+#endif /* CONFIG_NF_CONNTRACK_MPTCP */
+
 	spin_unlock_bh(&ct->lock);
 
 	if (new_state != old_state)
@@ -1156,7 +1162,7 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 
 #if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
 	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
-	nf_ct_mptcp_new(th, ct);
+	nf_ct_mptcp_new(ct, th);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 
 	return true;
