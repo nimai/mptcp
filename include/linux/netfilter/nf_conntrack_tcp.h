@@ -80,7 +80,7 @@ struct ip_ct_tcp {
 	struct nf_conn_mptcp *mpmaster;
 
 	/* per data-level connection info */
-/*	struct mptcp_subflow_info subflow;*/
+	struct mptcp_subflow_info mpflow_info;
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 };
 

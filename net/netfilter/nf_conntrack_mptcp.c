@@ -222,7 +222,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 	{
 /* ORIGINAL */
 /* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*syn*/	   { sSS, sSS, sIG, sIG, sIG, sIG, sIG, sSS, sSS, sS2 },
+/*mpcap syn*/	   { sSS, sSS, sIG, sIG, sIG, sIG, sIG, sSS, sSS, sS2 },
 /*
  *	sNO -> sSS	Initialize a new connection
  *	sSS -> sSS	Retransmitted SYN
@@ -239,7 +239,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sCL -> sSS
  */
 /* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*synack*/ { sIV, sIV, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*mpcap synack*/ { sIV, sIV, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
 /*
  *	sNO -> sIV	Too late and no reason to do anything
  *	sSS -> sIV	Client can't send SYN and then SYN/ACK
@@ -256,7 +256,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sCL -> sIG
  */
 /* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*datafin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
 /*
  *	sNO -> sIV	Too late and no reason to do anything...
  *	sSS -> sIV	Client migth not send FIN in this state:
@@ -273,7 +273,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sCL -> sCL
  */
 /* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*ack*/	   { sES, sIV, sES, sES, sCW, sCW, sTW, sTW, sCL, sIV },
+/*dataack*/	   { sES, sIV, sES, sES, sCW, sCW, sTW, sTW, sCL, sIV },
 /*
  *	sNO -> sES	Assumed.
  *	sSS -> sIV	ACK is invalid: we haven't seen a SYN/ACK yet.
@@ -287,7 +287,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sCL -> sCL
  */
 /* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
+/*fclose*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
 /*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
 	},
 	{
@@ -494,7 +494,7 @@ static bool mpjoin_new(struct nf_conn *ct, struct tcphdr *th,
 		struct mptcp_option* mptr)
 {
 	/* client is trying to establish a new subflow */
-			/* TODO: add subflow to mptcp struct */
+	/* TODO: add subflow to mptcp struct */
 	u32 token;
 	u64 key, isdn;
 	struct nf_conn_mptcp *mpct;
@@ -547,7 +547,7 @@ void nf_ct_mptcp_new_impl(struct nf_conn *ct, struct tcphdr *th)
 	}
 }
 
-static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
+static char* mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
 		struct mptcp_option *mptr)
 {
@@ -566,16 +566,91 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 			index, mptcp_conntrack_names[old_state], mptcp_conntrack_names[new_state]);
 
 	switch (new_state) {
+	case MPTCP_CONNTRACK_SYN_SENT:
+		/* Should not happen: no reopen possible with MPCAP option  */
+		break;
+	case MPTCP_CONNTRACK_SYN_RECV:
+		/* Possible cases:
+		 *	- regular SYNACK answer: extract info from it (key, ..)
+		 *	- simultaneous open: OK
+		 *	- ack answering late resent SYN - simultaneous open
+		 */
+		if (index == MPTCP_CAP_SYNACK) {
+			/*&& dir == IP_CT_DIR_REPLY) {* -- not needed because simultaneous
+			 * open possible */
+			/* extract key for server */
+			pr_debug("nf_ct_mptcp_pkt: received synack, ct=%p, mpct=%p\n", ct, mpct);
+			if (((struct mp_capable*)mptr)->sender_key)
+				nf_mptcp_key_sha1(((struct mp_capable*)mptr)->sender_key, 
+						&mpct->key[dir], &mpct->token[dir]);
+			else
+				return "nf_ct_mptcp: no key contained in SYNACK packet";
+		}
+
+		else if (index == MPTCP_CAP_ACK && dir == IP_CT_DIR_REPLY) {
+			/* 
+			 * SYN -> 
+			 * <- SYNACK
+			 * SYN ->
+			 * <- ACK  [Answer to late resent SYN]
+			 * ACK -> 
+			 * Does not carry any information */ 
+			pr_debug("nf_ct_mptcp_pkt: received ack, reply to late SYN, "
+					"ct=%p, mpct=%p\n", ct, mpct);
+		}
+		break;
+	case MPTCP_CONNTRACK_ESTABLISHED:
+		/* Possible cases:
+		 *	- data being transfered
+		 *	- just-negociated connection
+		 */
+		if (index == MPTCP_CAP_ACK) { 
+			/* can be for both directions in case of simultaneous open */
+			/* check if keys match local data */
+			if (((struct mp_capable*)mptr)->sender_key == mpct->key[dir] && 
+					((struct mp_capable*)mptr)->receiver_key == mpct->key[!dir]) {
+				return NULL; /* OK */
+			}
+			return "nf_ct_mptcp: keys from final MP_CAPABLE ACK don't match";
+		}
+		break;
 	default:
 		break;
 	}
-	return 0;
+	
+	return NULL;
 }
 
 static int mpsubflow_packet(struct nf_conn *ct, const struct tcphdr *th,
 		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
 		struct mptcp_option *mptr)
 {
+	enum mptcp_ct_state old_state, new_state;
+	struct nf_conntrack_tuple *tuple;
+	enum ip_conntrack_dir dir;
+	unsigned int index;
+	
+	old_state = ct->proto.tcp.mpflow_info.state;
+	dir = CTINFO2DIR(ctinfo);
+	index = get_conntrack_index(th);
+	new_state = mptcp_conntracks[dir][index][old_state]; /* FIXME: subflow FSM */
+	tuple = &ct->tuplehash[dir].tuple;
+		
+	pr_debug("nf_ct_mptcp_packet: received segmenttype %i, oldstate %s -> newstate %s\n",
+			index, mptcp_conntrack_names[old_state], mptcp_conntrack_names[new_state]);
+	/* FIXME: subflow FSM */
+
+	switch (new_state) {
+	case MPTCP_CONNTRACK_SYN_SENT:
+		/* Client trying to open a subflow
+		 * - might be while in ESTABLISHED state (common case)
+		 * - might be when no subflow remains, in TIME_WAIT state (mptcp draft 3.3.3)	
+		 * FIXME: no reopen in MPTCP ?
+		 *   */
+		
+	default:
+		break;
+	}
 	return 0;
 }
 

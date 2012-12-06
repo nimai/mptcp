@@ -45,6 +45,11 @@ enum mpsubflow_ct_state {
 	MPJOIN_CONNTRACK_IGNORE
 };
 
+struct mptcp_subflow_info {
+	__u32 nonce[IP_CT_DIR_MAX];
+	enum mpsubflow_ct_state state;
+};
+
 /* This structure exists only once per mptcp-level connection */
 struct nf_conn_mptcp {
 	/* Directions are relative to MP_CAPABLE SYN packet.
@@ -58,10 +63,6 @@ struct nf_conn_mptcp {
 	enum mptcp_ct_state state;
 };
 
-struct mptcp_subflow_info {
-	__u32 nonce[IP_CT_DIR_MAX];
-	enum mpsubflow_ct_state state;
-};
 
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
 void nf_mptcp_hash_insert(struct nf_conn_mptcp *mpconn, u32 token);
