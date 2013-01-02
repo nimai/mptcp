@@ -203,11 +203,14 @@ config NF_CONNTRACK_MPTCP
 	tristate 'MPTCP protocol connection tracking support (EXPERIMENTAL)'
 	depends on EXPERIMENTAL
 	help
-	  With this option enabled, the TCP protocol tracker will be 
-	  extended to support the MPTCP protocol induced by the introduction
-	  of the MPTCP option.
+	  Multipath TCP (MPTCP) is an extension of single-path TCP introducing a
+	  new connection level in order to use several subflows/physical links
+	  (regular TCP connections) as part of a same connection.
+	  
+	  This enables the Netfilter TCP connection tracker to extend its support
+	  to the tracking of MPTCP when the feature is detected. 
 
-	  If unsure, say 'N'.
+	  If unsure, say N.
 
 config NF_CONNTRACK_NETBIOS_NS
 	tristate "NetBIOS name service protocol support"

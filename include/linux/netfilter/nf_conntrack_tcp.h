@@ -4,8 +4,7 @@
 
 #include <linux/types.h>
 
-#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
-	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 #include <linux/netfilter/nf_conntrack_mptcp.h>
 #endif
 
@@ -74,8 +73,7 @@ struct ip_ct_tcp {
 	/* For SYN packets while we may be out-of-sync */
 	u_int8_t	last_wscale;	/* Last window scaling factor seen */
 	u_int8_t	last_flags;	/* Last flags set */
-#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
-	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	/* Reference to the mptcp connection structure */
 	struct nf_conn_mptcp *mpmaster;
 

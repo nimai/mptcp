@@ -61,32 +61,6 @@ static const char *const tcp_conntrack_names[] = {
 	"SYN_SENT2",
 };
 
-/* Trampoline code to use nf_mptcp_get_ptr_impl from external module only if
- * loaded */
-struct module* nf_conntrack_mptcp_mod;
-EXPORT_SYMBOL(nf_conntrack_mptcp_mod);
-
-void (*nf_ct_mptcp_new_implptr)(struct nf_conn *ct, const struct tcphdr *th);
-void (*nf_ct_mptcp_packet_implptr)(struct nf_conn *ct, const struct tcphdr *th);
-EXPORT_SYMBOL(nf_ct_mptcp_new_implptr);
-EXPORT_SYMBOL(nf_ct_mptcp_packet_implptr);
-
-/* if module is loaded and implptr is not NULL, the module code can be called
- * */
-void nf_ct_mptcp_new(struct nf_conn *ct, const struct tcphdr *th) 
-{
-	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_new_implptr) {
-		(*nf_ct_mptcp_new_implptr)(ct, th);
-		module_put(nf_conntrack_mptcp_mod);
-	}
-}
-void nf_ct_mptcp_packet(struct nf_conn *ct, const struct tcphdr *th) 
-{
-	if (try_module_get(nf_conntrack_mptcp_mod) && nf_ct_mptcp_packet_implptr) {
-		(*nf_ct_mptcp_packet_implptr)(ct, th);
-		module_put(nf_conntrack_mptcp_mod);
-	}
-}
 
 #define SECS * HZ
 #define MINS * 60 SECS
@@ -1054,8 +1028,7 @@ static int tcp_packet(struct nf_conn *ct,
 	else
 		timeout = tcp_timeouts[new_state];
 
-#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
-	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	nf_ct_mptcp_packet(ct, th, index, newstate);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 
@@ -1160,8 +1133,7 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 receiver->td_end, receiver->td_maxend, receiver->td_maxwin,
 		 receiver->td_scale);
 
-#if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
-	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	nf_ct_mptcp_new(ct, th);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 
