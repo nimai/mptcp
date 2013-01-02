@@ -1056,7 +1056,7 @@ static int tcp_packet(struct nf_conn *ct,
 
 #if defined(CONFIG_NF_CONNTRACK_MPTCP) || \
 	defined(CONFIG_NF_CONNTRACK_MPTCP_MODULE)
-	nf_ct_mptcp_packet(ct, th);
+	nf_ct_mptcp_packet(ct, th, index, newstate);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 
 	spin_unlock_bh(&ct->lock);

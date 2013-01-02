@@ -83,7 +83,8 @@ static const char *const mptcp_conntrack_names[] = {
 	"M_SYN_SENT2",
 	"M_SYN_RECV",
 	"M_ESTABLISHED",
-	"M_FALLBACK",
+	"M_NO_SUBFLOW",
+/*	"M_FALLBACK",*/
 	"M_FINWAIT",
 	"M_TIMEWAIT",
 	"M_CLOSEWAIT",
@@ -96,7 +97,7 @@ static const char *const mptcp_conntrack_names[] = {
 #define sMS2 MPTCP_CONNTRACK_SYN_SENT2
 #define	sMSR MPTCP_CONNTRACK_SYN_RECV
 #define sMES MPTCP_CONNTRACK_ESTABLISHED
-#define sMFB MPTCP_CONNTRACK_FALLBACK
+#define sMNS MPTCP_CONNTRACK_NO_SUBFLOW
 #define sMFW MPTCP_CONNTRACK_FINWAIT
 #define sMTW MPTCP_CONNTRACK_TIMEWAIT
 #define sMCW MPTCP_CONNTRACK_CLOSEWAIT
@@ -104,19 +105,7 @@ static const char *const mptcp_conntrack_names[] = {
 #define sMCL MPTCP_CONNTRACK_CLOSED
 #define sMIV MPTCP_CONNTRACK_MAX
 #define sMIG MPTCP_CONNTRACK_IGNORE
-
-#define sNO sMNO
-#define sSS sMSS
-#define sSR sMSR
-#define sES sMES
-#define sFW sMFW
-#define sCW sMCW
-#define sLA sMLA
-#define sTW sMTW
-#define sCL sMCL
-#define sS2 sMS2
-#define sIV sMIV
-#define sIG sMIG
+#define sMFB MPTCP_CONNTRACK_FALLBACK
 
 /* Possible packet types related to MPTCP connection */
 enum mptcp_pkt_type {
@@ -136,7 +125,6 @@ enum mptcp_pkt_type {
 	MPTCP_FAIL,
 	MPTCP_FASTCLOSE,
 	MPTCP_NOOPT,
-/*	MPTCP_SUB_FIN,*/
 	MPTCP_PKT_INDEX_MAX,
 };
 	
@@ -145,21 +133,8 @@ enum mptcp_pkt_type {
  *
  * INVALID and IGNORED: states for invalid packets and possibly invalid,
  * respectively
- *
- * M_NONE:		initial state
- * M_SYN_SENT:	MPCAP_SYN packet seen
- * M_SYN_SENT2:	MPCAP_SYN packet seen from reply dir, simultaneous open
- * M_SYN_RECV:	MPCAP_SYNACK packet seen
- * M_ESTABLISHED:	MPCAP_ACK packet seen and valid
- * M_FALLBACK:	checksum, key exchange, token or hash not valid
- * M_FINWAIT1:	MPTCP CLOSE demanded
- * M_FINWAIT2: Closing all subflows and rcvd DATA_ACK+FIN
- * M_TIMEWAIT:	waiting for subflows to be closed
- * M_CLOSEWAIT1:	simultaneous closing: DATA_FIN rcvd and sent
- * M_CLOSEWAIT2:	received DATA_FIN
- * M_LASTACK:	waiting for last ack
- * M_CLOSED:	connection closed, mptcp pcb deleted
- */
+*/
+
 
 /* Return the index of the packet-type corresponding to the packet seen
  * This refers to a value from enum mptcp_pkt_type 
@@ -221,133 +196,153 @@ static enum mptcp_pkt_type get_conntrack_index(const struct tcphdr *tcph)
 static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = {
 	{
 /* ORIGINAL */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*mpcap syn*/	   { sSS, sSS, sIG, sIG, sIG, sIG, sIG, sSS, sSS, sS2 },
+/*					sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*mpcap syn*/	   { sMSS, sMSS, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMSS, sMSS, sMS2 },
 /*
- *	sNO -> sSS	Initialize a new connection
- *	sSS -> sSS	Retransmitted SYN
- *	sS2 -> sS2	Late retransmitted SYN
- *	sSR -> sIG
- *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
+ *	sMNO -> sMSS	Initialize a new connection
+ *	sMSS -> sMSS	Retransmitted SYN
+ *	sMS2 -> sMS2	Late retransmitted SYN
+ *	sMSR -> sMIG
+ *	sMES -> sMIG	Error: SYNs in window outside the SYN_SENT state
  *			are errors. Receiver will reply with RST
  *			and close the connection.
  *			Or we are not in sync and hold a dead connection.
- *	sFW -> sIG
- *	sCW -> sIG
- *	sLA -> sIG
- *	sTW -> sSS	Reopened connection (RFC 1122).
- *	sCL -> sSS
+ *	sMFW -> sMIG
+ *	sMCW -> sMIG
+ *	sMLA -> sMIG
+ *	sMTW -> sMSS	Reopened connection (RFC 1122).
+ *	sMCL -> sMSS
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*mpcap synack*/ { sIV, sIV, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*				 sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*mpcap synack*/{ sMIV, sMIV, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMIG, sMIG, sMSR },
 /*
- *	sNO -> sIV	Too late and no reason to do anything
- *	sSS -> sIV	Client can't send SYN and then SYN/ACK
- *	sS2 -> sSR	SYN/ACK sent to SYN2 in simultaneous open
- *	sSR -> sIG
- *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
+ *	sMNO -> sMIV	Too late and no reason to do anything
+ *	sMSS -> sMIV	Client can't send SYN and then SYN/ACK
+ *	sMS2 -> sMSR	SYN/ACK sent to SYN2 in simultaneous open
+ *	sMSR -> sMIG
+ *	sMES -> sMIG	Error: SYNs in window outside the SYN_SENT state
  *			are errors. Receiver will reply with RST
  *			and close the connection.
  *			Or we are not in sync and hold a dead connection.
- *	sFW -> sIG
- *	sCW -> sIG
- *	sLA -> sIG
- *	sTW -> sIG
- *	sCL -> sIG
+ *	sMFW -> sMIG
+ *	sMCW -> sMIG
+ *	sMLA -> sMIG
+ *	sMTW -> sMIG
+ *	sMCL -> sMIG
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*datafin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*	    	     sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*mpcap ack*/ { sMIV, sMIV, sMES, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV },
 /*
- *	sNO -> sIV	Too late and no reason to do anything...
- *	sSS -> sIV	Client migth not send FIN in this state:
+ *	sMNO -> sMIV	Too late and no reason to do anything
+ *	sMSS -> sMIV	Client can't send SYN and then SYN/ACK
+ *	sMS2 -> sMSR	SYN/ACK sent to SYN2 in simultaneous open
+ *	sMSR -> sMIG
+ *	sMES -> sMIG	Error: SYNs in window outside the SYN_SENT state
+ *			are errors. Receiver will reply with RST
+ *			and close the connection.
+ *			Or we are not in sync and hold a dead connection.
+ *	sMFW -> sMIG
+ *	sMCW -> sMIG
+ *	sMLA -> sMIG
+ *	sMTW -> sMIG
+ *	sMCL -> sMIG
+ */
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*datafin*/    { sMIV, sMIV, sMFW, sMFW, sMIG, sMLA, sMLA, sMLA, sMTW, sMCL, sMIV },
+/*
+ *	sMNO -> sMIV	Too late and no reason to do anything...
+ *	sMSS -> sMIV	Client migth not send FIN in this state:
  *			we enforce waiting for a SYN/ACK reply first.
- *	sS2 -> sIV
- *	sSR -> sFW	Close started.
- *	sES -> sFW
- *	sFW -> sLA	FIN seen in both directions, waiting for
+ *	sMS2 -> sMIV
+ *	sMSR -> sMFW	Close started.
+ *	sMES -> sMFW
+ *	sMNS -> sMIG	
+ *	sMFW -> sMLA	FIN seen in both directions, waiting for
  *			the last ACK.
  *			Migth be a retransmitted FIN as well...
- *	sCW -> sLA
- *	sLA -> sLA	Retransmitted FIN. Remain in the same state.
- *	sTW -> sTW
- *	sCL -> sCL
+ *	sMCW -> sMLA
+ *	sMLA -> sMLA	Retransmitted FIN. Remain in the same state.
+ *	sMTW -> sMTW
+ *	sMCL -> sMCL
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*dataack*/	   { sES, sIV, sES, sES, sCW, sCW, sTW, sTW, sCL, sIV },
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*dataack*/	   { sMES, sMIV, sMES, sMES, sMIG, sMCW, sMCW, sMTW, sMTW, sMCL, sMIV },
 /*
- *	sNO -> sES	Assumed.
- *	sSS -> sIV	ACK is invalid: we haven't seen a SYN/ACK yet.
- *	sS2 -> sIV
- *	sSR -> sES	Established state is reached.
- *	sES -> sES	:-)
- *	sFW -> sCW	Normal close request answered by ACK.
- *	sCW -> sCW
- *	sLA -> sTW	Last ACK detected.
- *	sTW -> sTW	Retransmitted last ACK. Remain in the same state.
- *	sCL -> sCL
+ *	sMNO -> sMES	Assumed.
+ *	sMSS -> sMIV	ACK is invalid: we haven't seen a SYN/ACK yet.
+ *	sMS2 -> sMIV
+ *	sMSR -> sMES	Established state is reached.
+ *	sMES -> sMES	:-)
+ *	sMFW -> sMCW	Normal close request answered by ACK.
+ *	sMCW -> sMCW
+ *	sMLA -> sMTW	Last ACK detected.
+ *	sMTW -> sMTW	Retransmitted last ACK. Remain in the same state.
+ *	sMCL -> sMCL
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*fclose*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
-/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
+/*
+ *  */
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*fclose*/    { sMIV, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL },
+/*no_opt*/   { sMFB, sMFB, sMFB, sMES, sMIG, sMFW, sMCW, sMLA, sMTW, sMCL, sMFB }
 	},
 	{
 /* REPLY */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*syn*/	   { sIV, sS2, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sS2 },
+/* 	     sMNO, sMSS, sMSR, sMES, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*syn*/	   { sMIV, sMS2, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMS2 },
 /*
- *	sNO -> sIV	Never reached.
- *	sSS -> sS2	Simultaneous open
- *	sS2 -> sS2	Retransmitted simultaneous SYN
- *	sSR -> sIV	Invalid SYN packets sent by the server
- *	sES -> sIV
- *	sFW -> sIV
- *	sCW -> sIV
- *	sLA -> sIV
- *	sTW -> sIV	Reopened connection, but server may not do it.
- *	sCL -> sIV
+ *	sMNO -> sMIV	Never reached.
+ *	sMSS -> sMS2	Simultaneous open
+ *	sMS2 -> sMS2	Retransmitted simultaneous SYN
+ *	sMSR -> sMIV	Invalid SYN packets sent by the server
+ *	sMES -> sMIV
+ *	sMFW -> sMIV
+ *	sMCW -> sMIV
+ *	sMLA -> sMIV
+ *	sMTW -> sMIV	Reopened connection, but server may not do it.
+ *	sMCL -> sMIV
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*synack*/ { sIV, sSR, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/* 	     sMNO, sMSS, sMSR, sMES, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*synack*/ { sMIV, sMSR, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMIG, sMSR },
 /*
- *	sSS -> sSR	Standard open.
- *	sS2 -> sSR	Simultaneous open
- *	sSR -> sIG	Retransmitted SYN/ACK, ignore it.
- *	sES -> sIG	Late retransmitted SYN/ACK?
- *	sFW -> sIG	Might be SYN/ACK answering ignored SYN
- *	sCW -> sIG
- *	sLA -> sIG
- *	sTW -> sIG
- *	sCL -> sIG
+ *	sMSS -> sMSR	Standard open.
+ *	sMS2 -> sMSR	Simultaneous open
+ *	sMSR -> sMIG	Retransmitted SYN/ACK, ignore it.
+ *	sMES -> sMIG	Late retransmitted SYN/ACK?
+ *	sMFW -> sMIG	Might be SYN/ACK answering ignored SYN
+ *	sMCW -> sMIG
+ *	sMLA -> sMIG
+ *	sMTW -> sMIG
+ *	sMCL -> sMIG
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/* 	     sMNO, sMSS, sMSR, sMES, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*fin*/    { sMIV, sMIV, sMFW, sMFW, sMLA, sMLA, sMLA, sMTW, sMCL, sMIV },
 /*
- *	sSS -> sIV	Server might not send FIN in this state.
- *	sS2 -> sIV
- *	sSR -> sFW	Close started.
- *	sES -> sFW
- *	sFW -> sLA	FIN seen in both directions.
- *	sCW -> sLA
- *	sLA -> sLA	Retransmitted FIN.
- *	sTW -> sTW
- *	sCL -> sCL
+ *	sMSS -> sMIV	Server might not send FIN in this state.
+ *	sMS2 -> sMIV
+ *	sMSR -> sMFW	Close started.
+ *	sMES -> sMFW
+ *	sMFW -> sMLA	FIN seen in both directions.
+ *	sMCW -> sMLA
+ *	sMLA -> sMLA	Retransmitted FIN.
+ *	sMTW -> sMTW
+ *	sMCL -> sMCL
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*ack*/	   { sIV, sIG, sSR, sES, sCW, sCW, sTW, sTW, sCL, sIG },
+/* 	     sMNO, sMSS, sMSR, sMES, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*ack*/	   { sMIV, sMIG, sMSR, sMES, sMCW, sMCW, sMTW, sMTW, sMCL, sMIG },
 /*
- *	sSS -> sIG	Might be a half-open connection.
- *	sS2 -> sIG
- *	sSR -> sSR	Might answer late resent SYN.
- *	sES -> sES	:-)
- *	sFW -> sCW	Normal close request answered by ACK.
- *	sCW -> sCW
- *	sLA -> sTW	Last ACK detected.
- *	sTW -> sTW	Retransmitted last ACK.
- *	sCL -> sCL
+ *	sMSS -> sMIG	Might be a half-open connection.
+ *	sMS2 -> sMIG
+ *	sMSR -> sMSR	Might answer late resent SYN.
+ *	sMES -> sMES	:-)
+ *	sMFW -> sMCW	Normal close request answered by ACK.
+ *	sMCW -> sMCW
+ *	sMLA -> sMTW	Last ACK detected.
+ *	sMTW -> sMTW	Retransmitted last ACK.
+ *	sMCL -> sMCL
  */
-/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
-/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
-/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
+/* 	     sMNO, sMSS, sMSR, sMES, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2	*/
+/*rst*/    { sMIV, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL },
+/*none*/   { sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV }
 	}
 };
 
