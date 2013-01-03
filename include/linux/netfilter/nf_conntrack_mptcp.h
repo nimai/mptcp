@@ -28,7 +28,12 @@ enum mptcp_ct_state {
 
 
 struct mptcp_subflow_info {
-	__u32 nonce[IP_CT_DIR_MAX];
+	u_int8_t addr_id;
+	u_int32_t nonce[IP_CT_DIR_MAX];
+	/* original direction relative to MPTCP base subflow
+	 *	IP_CT_DIR_ORIGINAL: same as MPTCP
+	 *	IP_CT_DIR_REPLY: opposite */
+	enum ip_conntrack_dir rel_dir;	
 	struct {
 		u_int64_t dataseq_start;
 		u_int32_t subseq_start;
@@ -43,10 +48,16 @@ struct nf_conn_mptcp {
 	 *	IP_CT_DIR_ORIGINAL: initiator host
 	 *	IP_CT_DIR_REPLY: receiver
 	 */
-	__u64 key[IP_CT_DIR_MAX]; 
-	__u32 token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
+	u_int64_t key[IP_CT_DIR_MAX]; 
+	u_int32_t token[IP_CT_DIR_MAX];	/* token = lefttrunc32(sha1(key)) */ 
+	u_int64_t last_dseq;
+	u_int64_t last_dack;
+	u_int64_t last_dend; /* last dseq + last segment payload */
     struct list_head collide_tk; /* item of hash tables */ 
 	enum mptcp_ct_state state;
+	u_int8_t counter_sub; /* number of subflows for this data connection */
+	spinlock_t lock; /* struct mustnt be modified by several 
+						subflows at the same time*/
 };
 
 
