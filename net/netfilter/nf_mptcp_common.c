@@ -1,4 +1,8 @@
-#include <linux/netfilter/nf_conntrack_mptcp.h>
+/*
+ * #include <linux/netfilter/nf_conntrack_mptcp.h>
+ * */
+#include <linux/module.h>
+#include <net/mptcp.h>
 
 
 /* Look for the presence of MPTCP in the set of TCP options from a given

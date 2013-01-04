@@ -829,6 +829,8 @@ int tcp_error(struct net *net, struct nf_conn *tmpl,
 	return NF_ACCEPT;
 }
 
+EXPORT_SYMBOL(tcp_error);
+
 /* Returns verdict for packet, or -1 for invalid. */
 int tcp_packet(struct nf_conn *ct,
 		      const struct sk_buff *skb,
@@ -848,9 +850,12 @@ int tcp_packet(struct nf_conn *ct,
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	struct mptcp_subflow_info *mpsub;
 	struct nf_conn_mptcp *mpct;
+	struct mp_join *mptr;
+	u32 hash;
+	u64 key1, key2;
 
 	mpsub = &ct->proto.tcp.mpflow;
-	mpct = &ct->proto.tcp.mpmaster;
+	mpct = ct->proto.tcp.mpmaster;
 #endif
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
@@ -973,15 +978,12 @@ int tcp_packet(struct nf_conn *ct,
 	
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	case TCP_CONNTRACK_SYN_RECV:
-		struct mp_join *mptr;
-		u32 hash;
-		u64 key1, key2;
 		if (nf_ct_mptcp_verify_hash && index == TCP_SYNACK_SET 
 				&& (mptr = nf_mptcp_find_join(th))) {
 			/* MPJOIN SYNACK received
 			 * Check the hash */
-			key1 = mpct->key[nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
-			key2 = mpct->key[!nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+			key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
+			key2 = mpct->d[!nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
 			mpsub->nonce[dir] = be32_to_cpu(mptr->u.synack.nonce);
 			BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
 			/* effective hashing */
@@ -1009,19 +1011,14 @@ int tcp_packet(struct nf_conn *ct,
 					return -NF_ACCEPT;
 				} else if (index == TCP_ACK_SET && !nf_mptcp_get_ptr(th)) {
 					ct->proto.tcp.mpflow.established = true;
-					/* increment the subflow counter and update the MPTCP FSM
-					 * state */
-					nf_mptcp_add_subflow(mpct);
 				}
 			} else if (nf_ct_mptcp_verify_hash &&
 					old_state == TCP_CONNTRACK_SYN_RECV &&
-					index == TCP_SYNACK_SET) {
-				struct mp_join *mptr;
-				u32 hash;
-				u64 key1, key2;
+					index == TCP_SYNACK_SET &&
+					(mptr = nf_mptcp_find_join(th))) {
 				/* check hash */
-				key1 = mpct->key[nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
-				key2 = mpct->key[!nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+				key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
+				key2 = mpct->d[!nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
 				BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
 				/* effective hashing */
 				nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
@@ -1143,6 +1140,7 @@ int tcp_packet(struct nf_conn *ct,
 
 	return NF_ACCEPT;
 }
+EXPORT_SYMBOL(tcp_packet);
 
 /* Called when a new connection for this protocol found. */
 bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
@@ -1153,6 +1151,12 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 	struct tcphdr _tcph;
 	const struct ip_ct_tcp_state *sender = &ct->proto.tcp.seen[0];
 	const struct ip_ct_tcp_state *receiver = &ct->proto.tcp.seen[1];
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	u32 token;
+	struct nf_conn_mptcp *mpct;
+	struct mptcp_subflow_info *mpsub;
+	struct mptcp_option *mptr;
+#endif
 
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
@@ -1181,13 +1185,8 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-		struct mptcp_option *mptr;
 		if (!(mptr = nf_mptcp_get_ptr(th)) && mptr->sub == MPTCP_SUB_JOIN) {
 			/* client is trying to establish a new subflow */
-			u32 token;
-			u64 key, isdn;
-			struct nf_conn_mptcp *mpct;
-			struct mp_subflow_info *mpsub;
 			
 			/* Is this a subflow of an existing MultipathTCP connection ? */
 			/* if we find an existing valid mptcp connection matching 
@@ -1211,12 +1210,17 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 				mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
 				/* the direction is the same as mpct if rcvd token is the one from
 				 * original direction of mpct */
-				mpsub->rel_dir = (mpct->token[IP_CT_DIR_ORIGINAL] == token) | 
+				mpsub->rel_dir = (mpct->d[IP_CT_DIR_ORIGINAL].token == token) | 
 					IP_CT_DIR_ORIGINAL;
 				mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
 					((struct mp_join*)mptr)->u.syn.nonce;
 				/* for preestablished state */
 				mpsub->established = false;
+				/* increment the subflow counter and update the MPTCP FSM
+				* state. Do this here instead of when it establishes, so that 
+				* if it is reset before establishment, the remove subflow 
+				* doesnt decrement for nothing */
+				nf_mptcp_add_subflow(mpct);
 			} else if (mpct) {
 				pr_debug("conntrack: mp_join's token expected but MPTCP "
 						"connection not established, ct=%p\n",ct);
@@ -1224,12 +1228,8 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			else {
 				pr_debug("conntrack: unexpected token in mp_join segment,"
 						"ct=%p\n",ct);
-				if (LOG_INVALID(net, IPPROTO_TCP))
-					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
-							"nf_ct_mptcp: unexpected token=%x in mp_join "
-							"segment, ct=%p\n",token,ct);
 				spin_unlock_bh(&mpct->lock);
-				return -NF_ACCEPT;
+				return false;
 			}
 			spin_unlock_bh(&mpct->lock);
 		}
@@ -1272,6 +1272,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 receiver->td_scale);
 	return true;
 }
+EXPORT_SYMBOL(tcp_new);
 
 #if defined(CONFIG_NF_CT_NETLINK) || defined(CONFIG_NF_CT_NETLINK_MODULE)
 

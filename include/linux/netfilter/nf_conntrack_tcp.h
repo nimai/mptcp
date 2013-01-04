@@ -3,9 +3,23 @@
 /* TCP tracking. */
 
 #include <linux/types.h>
+#include <linux/netfilter/nf_conntrack_tuple_common.h>
 
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-#include <linux/netfilter/nf_conntrack_mptcp.h>
+struct mptcp_subflow_info {
+	u_int8_t addr_id;
+	u_int32_t nonce[IP_CT_DIR_MAX];
+	/* original direction relative to MPTCP base subflow
+	 *	IP_CT_DIR_ORIGINAL: same as MPTCP
+	 *	IP_CT_DIR_REPLY: opposite */
+	enum ip_conntrack_dir rel_dir;	
+	struct {
+		u_int64_t dataseq_start;
+		u_int32_t subseq_start;
+		u_int16_t len;
+	} map[IP_CT_DIR_MAX];
+	bool established;
+};
 #endif
 
 /* This is exposed to userspace (ctnetlink) */
