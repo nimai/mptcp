@@ -8,24 +8,6 @@
 #include <linux/netfilter/nf_conntrack_tuple_common.h>
 #include <linux/module.h>
 
-/* Finite State Machine setup */
-enum mptcp_ct_state {
-	MPTCP_CONNTRACK_NONE,
-	MPTCP_CONNTRACK_SYN_SENT,
-	MPTCP_CONNTRACK_SYN_SENT2,
-	MPTCP_CONNTRACK_SYN_RECV,
-	MPTCP_CONNTRACK_ESTABLISHED,
-	MPTCP_CONNTRACK_NO_SUBFLOW,
-	MPTCP_CONNTRACK_FINWAIT,
-	MPTCP_CONNTRACK_TIMEWAIT,
-	MPTCP_CONNTRACK_CLOSEWAIT,
-	MPTCP_CONNTRACK_LASTACK,
-	MPTCP_CONNTRACK_CLOSED,
-	MPTCP_CONNTRACK_MAX,
-	MPTCP_CONNTRACK_IGNORE,
-	MPTCP_CONNTRACK_FALLBACK
-};
-
 
 struct mptcp_subflow_info {
 	u_int8_t addr_id;
@@ -39,6 +21,7 @@ struct mptcp_subflow_info {
 		u_int32_t subseq_start;
 		u_int16_t len;
 	} map[IP_CT_DIR_MAX];
+	bool established;
 };
 
 /* This structure exists only once per mptcp-level connection */
@@ -58,8 +41,16 @@ struct nf_conn_mptcp {
 	u_int8_t counter_sub; /* number of subflows for this data connection */
 	spinlock_t lock; /* struct mustnt be modified by several 
 						subflows at the same time*/
+	struct timer_list timeout; /* timer for destruction of the data connection state */
 };
 
+/* return the mptcp dir from the current packet's dir and the subflow original
+ * relative dir*/
+inline enum ip_conntrack_dir nf_mptcp_subdir2dir(struct mptcp_subflow_info *sub, 
+		enum ip_conntrack_dir dir)
+{
+	return sub->rel_dir ^ dir;
+}
 
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
 void nf_mptcp_hash_insert(struct nf_conn_mptcp *mpconn, u32 token);
@@ -76,6 +67,82 @@ u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr);
 struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *hptr);
 struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th);
 
+/* crypto functions */
+void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
+		       u32 *hash_out);
+void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn);
+
+/* MPTCP connection tracking */
+
+/* Finite State Machine setup */
+enum mptcp_ct_state {
+	MPTCP_CONNTRACK_NONE,
+	MPTCP_CONNTRACK_SYN_SENT,
+	MPTCP_CONNTRACK_SYN_SENT2,
+	MPTCP_CONNTRACK_SYN_RECV,
+	MPTCP_CONNTRACK_ESTABLISHED,
+	MPTCP_CONNTRACK_NO_SUBFLOW,
+	MPTCP_CONNTRACK_FINWAIT,
+	MPTCP_CONNTRACK_TIMEWAIT,
+	MPTCP_CONNTRACK_CLOSEWAIT,
+	MPTCP_CONNTRACK_LASTACK,
+	MPTCP_CONNTRACK_CLOSED,
+	MPTCP_CONNTRACK_MAX,
+	MPTCP_CONNTRACK_IGNORE,
+	MPTCP_CONNTRACK_FALLBACK
+};
+
+/* There are only 2 states of MPTCP's conntrack that can elicit a timeout:
+ * MPTCP_CONNTRACK_NO_SUBFLOW and MPTCP_CONNTRACK_CLOSE.
+ * In all the other cases, there is at least one single-path TCP conntrack that will expires 
+ *	and bring back the MPTCP's state to MPTCP_CONNTRACK_NO_SUBFLOW */
+static unsigned int mptcp_timeouts[MPTCP_CONNTRACK_MAX] __read_mostly = {
+	[MPTCP_CONNTRACK_NO_SUBFLOW]	= 10 MINS,
+	[MPTCP_CONNTRACK_CLOSE]			= 10 SECS,
+};
+
+int nf_ct_mptcp_error(struct net *net, struct nf_conn *tmpl,
+		     struct sk_buff *skb,
+		     unsigned int dataoff,
+		     enum ip_conntrack_info *ctinfo,
+		     u_int8_t pf,
+		     unsigned int hooknum);
+
+bool nf_ct_mptcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+		    unsigned int dataoff);
+
+int nf_ct_mptcp_packet(struct nf_conn *ct,
+		      const struct sk_buff *skb,
+		      unsigned int dataoff,
+		      enum ip_conntrack_info ctinfo,
+		      u_int8_t pf,
+		      unsigned int hooknum);
+
+void nf_ct_mptcp_destroy(struct nf_conn *ct);
+
+/* MPTCP subflow tracking -related */
+/* update the subflow counter and MPTCP FSM when a subflow is added
+ * Return true if the FSM state has been effectively changed */
+inline bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct) {
+	mpct->counter_sub += 1;
+	BUG_ON(mpct->counter_sub <= 0);
+	if (mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW) {
+		mpct->state = MPTCP_CONNTRACK_ESTABLISHED;
+		return true;
+	}
+	return false;
+}
+/* update the subflow counter and MPTCP FSM when a subflow is removed
+ * Return true if the FSM state has been effectively changed */
+inline bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct) {
+	mpct->counter_sub -= 1;
+	BUG_ON(mpct->counter_sub < 0);
+	if (mpct->state == MPTCP_CONNTRACK_ESTABLISHED && mpct->counter_sub == 0) {
+		mpct->state = MPTCP_CONNTRACK_NO_SUBFLOW;
+		return true;
+	}
+	return false;
+}
 
 #if 0 
 struct mptcp_option *(*nf_mptcp_get_ptr_impl)(const struct tcphdr *th);

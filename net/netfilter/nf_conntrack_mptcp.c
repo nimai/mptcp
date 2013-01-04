@@ -12,8 +12,6 @@
 
 #define NF_MPTCP_HASH_SIZE 256
 
-
-
 extern struct module* nf_conntrack_mptcp_mod;
 extern void (*nf_ct_mptcp_new_implptr)(struct nf_conn *ct, const struct tcphdr *th);
 extern void (*nf_ct_mptcp_packet_implptr)(struct nf_conn *ct, const struct tcphdr *th);
@@ -60,7 +58,7 @@ void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn)
 {
 	/* remove from the token hashtable */
 	write_lock_bh(&htb_lock);
-	list_del(&mpconn->collide_tk);
+	list_del(&mpconn->collide_tk); /* FIXME */
 	write_unlock_bh(&htb_lock);
 }
 
@@ -76,7 +74,161 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 
 
 
-/* Define states' names  TODO */ 
+/* Search for the JOIN subkind in a MPTCP segment 
+ * Return a pointer to the JOIN subtype in the skb
+ * or NULL if it can't be found 
+ * */
+struct mp_join *nf_mptcp_find_join(const struct tcphdr *th)
+{
+    struct mptcp_option *opt = 
+		(struct mptcp_option*)(th + 1); /* skip the common tcp header */
+	/* iterates over the mptcp options */
+	while ((opt = nf_mptcp_next_mpopt(th, (u8*)opt)))
+		if (opt->sub == MPTCP_SUB_JOIN)
+			return (struct mp_join*)opt;
+
+	return NULL;
+}
+
+
+/* Get the token from a mp_join structure from a SYN packet */
+static inline __u32 __nf_mptcp_get_token(struct mp_join *mpj)
+{
+    if (mpj && mpj->u.syn.token)
+        return mpj->u.syn.token;
+    return 0;
+}
+
+/* Get the token from a TCP header of a SYN packet */
+__u32 nf_mptcp_get_token(const struct tcphdr *th)
+{
+    struct mp_join *mpj;
+    /* The token is only available in a SYN segment */
+    if (!th->syn)
+        return 0;
+
+    mpj = nf_mptcp_find_join(th);
+	return __nf_mptcp_get_token(mpj);
+}
+
+
+u64 __nf_mptcp_get_key(struct mp_capable * mpc)
+{
+	if (mpc && mpc->sender_key)
+		return mpc->sender_key;
+	return 0;
+}
+
+/**
+ * sha_init - initialize the vectors for a SHA1 digest
+ * @buf: vector to initialize
+ * (copied from sha1.c)
+ */
+static void sha_init(__u32 *buf)
+{
+	buf[0] = 0x67452301;
+	buf[1] = 0xefcdab89;
+	buf[2] = 0x98badcfe;
+	buf[3] = 0x10325476;
+	buf[4] = 0xc3d2e1f0;
+}
+
+/* Return the token and initial data sequence number from a 64bits key. 
+ * This is a copy of mptcp_key_sha1() from net/mptcp/mptcp_ctrl.c as the
+ * netfilter mptcp support does not depend on CONFIG_MPTCP */
+void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn)
+{
+	u32 workspace[SHA_WORKSPACE_WORDS];
+	u32 mptcp_hashed_key[SHA_DIGEST_WORDS];
+	u8 input[64];
+	int i;
+
+	memset(workspace, 0, sizeof(workspace));
+
+	/* Initialize input with appropriate padding */
+	memset(&input[9], 0, sizeof(input) - 10); /* -10, because the last byte
+						   * is explicitly set too */
+	memcpy(input, &key, sizeof(key)); /* Copy key to the msg beginning */
+	input[8] = 0x80; /* Padding: First bit after message = 1 */
+	input[63] = 0x40; /* Padding: Length of the message = 64 bits */
+
+	sha_init(mptcp_hashed_key);
+	sha_transform(mptcp_hashed_key, input, workspace);
+
+	for (i = 0; i < 5; i++)
+		mptcp_hashed_key[i] = cpu_to_be32(mptcp_hashed_key[i]);
+
+	if (token)
+		*token = mptcp_hashed_key[0];
+	if (idsn)
+		*idsn = ((u64)mptcp_hashed_key[3] << 32) | mptcp_hashed_key[4];
+}
+
+/* Return the hmac computed over keys and nonces.
+ * This is a copy of mptcp_hmac_sha1() from net/mptcp/mptcp_ctrl.c as the
+ * netfilter mptcp support does not depend on CONFIG_MPTCP */
+void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
+		       u32 *hash_out)
+{
+	u32 workspace[SHA_WORKSPACE_WORDS];
+	u8 input[128]; /* 2 512-bit blocks */
+	int i;
+
+	memset(workspace, 0, sizeof(workspace));
+
+	/* Generate key xored with ipad */
+	memset(input, 0x36, 64);
+	for (i = 0; i < 8; i++)
+		input[i] ^= key_1[i];
+	for (i = 0; i < 8; i++)
+		input[i + 8] ^= key_2[i];
+
+	memcpy(&input[64], rand_1, 4);
+	memcpy(&input[68], rand_2, 4);
+	input[72] = 0x80; /* Padding: First bit after message = 1 */
+	memset(&input[73], 0, 53);
+
+	/* Padding: Length of the message = 512 + 64 bits */
+	input[126] = 0x02;
+	input[127] = 0x40;
+
+	sha_init(hash_out);
+	sha_transform(hash_out, input, workspace);
+	memset(workspace, 0, sizeof(workspace));
+
+	sha_transform(hash_out, &input[64], workspace);
+	memset(workspace, 0, sizeof(workspace));
+
+	for (i = 0; i < 5; i++)
+		hash_out[i] = cpu_to_be32(hash_out[i]);
+
+	/* Prepare second part of hmac */
+	memset(input, 0x5C, 64);
+	for (i = 0; i < 8; i++)
+		input[i] ^= key_1[i];
+	for (i = 0; i < 8; i++)
+		input[i + 8] ^= key_2[i];
+
+	memcpy(&input[64], hash_out, 20);
+	input[84] = 0x80;
+	memset(&input[85], 0, 41);
+
+	/* Padding: Length of the message = 512 + 160 bits */
+	input[126] = 0x02;
+	input[127] = 0xA0;
+
+	sha_init(hash_out);
+	sha_transform(hash_out, input, workspace);
+	memset(workspace, 0, sizeof(workspace));
+
+	sha_transform(hash_out, &input[64], workspace);
+
+	for (i = 0; i < 5; i++)
+		hash_out[i] = cpu_to_be32(hash_out[i]);
+}
+
+
+/* Define states' names */ 
 static const char *const mptcp_conntrack_names[] = {
 	"M_NONE",
 	"M_SYN_SENT",
@@ -341,100 +493,26 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 	}
 };
 
+/* Timer */
 
-
-
-/* Search for the JOIN subkind in a MPTCP segment 
- * Return a pointer to the JOIN subtype in the skb
- * or NULL if it can't be found 
- * */
-struct mp_join *nf_mptcp_find_join(const struct tcphdr *th)
-{
-    struct mptcp_option *opt = 
-		(struct mptcp_option*)(th + 1); /* skip the common tcp header */
-	/* iterates over the mptcp options */
-	while ((opt = nf_mptcp_next_mpopt(th, (u8*)opt)))
-		if (opt->sub == MPTCP_SUB_JOIN)
-			return (struct mp_join*)opt;
-
-	return NULL;
+void nf_mptcp_update_timers(struct nf_conn_mptcp *mpct) {
+	BUG_ON(mpct->state != MPTCP_CONNTRACK_NO_SUBFLOW &&
+			mpct->state != MPTCP_CONNTRACK_CLOSE);
+	/* adjust the timer or reactive it: mptcp conntrack will die whenever the 
+	 * timeout associated to the current state expires*/
+	mod_timer(&mpct->timeout, mptcp_timeouts[mpct->state]);
 }
 
-
-/* Get the token from a mp_join structure from a SYN packet */
-static inline __u32 __nf_mptcp_get_token(struct mp_join *mpj)
-{
-    if (mpj && mpj->u.syn.token)
-        return mpj->u.syn.token;
-    return 0;
+static void nf_mptcp_death_by_timeout(struct nf_conn_mptcp *mpct) {
+	/* delete references from hashtable: there are only 2, one for each
+	 * token */
+	/* FIXME */
+	nf_mptcp_hash_remove(mpct);
 }
 
-/* Get the token from a TCP header of a SYN packet */
-__u32 nf_mptcp_get_token(const struct tcphdr *th)
-{
-    struct mp_join *mpj;
-    /* The token is only available in a SYN segment */
-    if (!th->syn)
-        return 0;
-
-    mpj = nf_mptcp_find_join(th);
-	return __nf_mptcp_get_token(mpj);
+static void nf_mptcp_delete_timer(struct nf_conn_mptcp *mpct) {
+	del_timer(&mpct->timeout);
 }
-
-
-u64 __nf_mptcp_get_key(struct mp_capable * mpc)
-{
-	if (mpc && mpc->sender_key)
-		return mpc->sender_key;
-	return 0;
-}
-
-/**
- * sha_init - initialize the vectors for a SHA1 digest
- * @buf: vector to initialize
- * (copied from sha1.c)
- */
-void sha_init(__u32 *buf)
-{
-	buf[0] = 0x67452301;
-	buf[1] = 0xefcdab89;
-	buf[2] = 0x98badcfe;
-	buf[3] = 0x10325476;
-	buf[4] = 0xc3d2e1f0;
-}
-
-/* Return the token and initial data sequence number from a 64bits key. 
- * This is a copy of mptcp_key_sha1() from net/mptcp/mptcp_ctrl.c as the
- * netfilter mptcp support does not depend on CONFIG_MPTCP */
-void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn)
-{
-	u32 workspace[SHA_WORKSPACE_WORDS];
-	u32 mptcp_hashed_key[SHA_DIGEST_WORDS];
-	u8 input[64];
-	int i;
-
-	memset(workspace, 0, sizeof(workspace));
-
-	/* Initialize input with appropriate padding */
-	memset(&input[9], 0, sizeof(input) - 10); /* -10, because the last byte
-						   * is explicitly set too */
-	memcpy(input, &key, sizeof(key)); /* Copy key to the msg beginning */
-	input[8] = 0x80; /* Padding: First bit after message = 1 */
-	input[63] = 0x40; /* Padding: Length of the message = 64 bits */
-
-	sha_init(mptcp_hashed_key);
-	sha_transform(mptcp_hashed_key, input, workspace);
-
-	for (i = 0; i < 5; i++)
-		mptcp_hashed_key[i] = cpu_to_be32(mptcp_hashed_key[i]);
-
-	if (token)
-		*token = mptcp_hashed_key[0];
-	if (idsn)
-		*idsn = ((u64)mptcp_hashed_key[3] << 32) | mptcp_hashed_key[4];
-}
-
-
 
 static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th, 
 		struct mptcp_option* mptr)
@@ -443,6 +521,7 @@ static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th,
 	u32 token;
 	u64 key, idsn;
 	struct nf_conn_mptcp *mpct;
+	struct mptcp_subflow_info *mpsub;
 	
 	/* verify if there exists an mptcp tracker for this packet */
 	key = __nf_mptcp_get_key((struct mp_capable*)mptr);
@@ -473,7 +552,13 @@ static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th,
 		mpct->key[IP_CT_DIR_ORIGINAL] = key;
 		mpct->token[IP_CT_DIR_ORIGINAL] = token;
 		mpct->last_dseq[IP_CT_DIR_ORIGINAL] = idsn;
+		mpct->counter_sub = 1;
 		nf_mptcp_hash_insert(mpct, token);
+
+		/* Fill subflow-related info as well */
+		mpsub->addr_id = 0; /* first subflow is always 0 */
+		/* relative direction is always ORIGINAL for original subflow by definition */
+		mpsub->rel_dir = IP_CT_DIR_ORIGINAL; 
 		/* Keep a ref to master mptcp connnection in every subflow conntrack */
 		ct->proto.tcp.mpmaster = mpct;
 	}
@@ -483,82 +568,19 @@ static bool mpcap_new(struct nf_conn *ct, struct tcphdr *th,
 
 }
 
-static bool mpjoin_new(struct nf_conn *ct, struct tcphdr *th,
-		struct mptcp_option* mptr)
-{
-	/* client is trying to establish a new subflow */
-	u32 token;
-	u64 key, isdn;
-	struct nf_conn_mptcp *mpct;
-	struct mp_subflow_info *mpsub;
-
-	/* Is this a subflow of an existing MultipathTCP connection ? */
-	/* if we find an existing valid mptcp connection matching 
-	 * this conn's token
-	 * for the original direction, it is highly probable that the
-	 * sender is an end-host of that mptcp connection. */
-	token = __nf_mptcp_get_token((struct mp_join*)mptr);
-	mpct = nf_mptcp_hash_find(token);
-	/* the mptcp connection needs to be established before accepting any
-	 * new subflow */
-	if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
-				mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW)) {
-		pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
-		/* mark as RELATED */
-		__set_bit(IPS_EXPECTED_BIT, &ct->status);
-		/* link to parent mptcp state */
-		ct->proto.tcp.mpmaster = mpct;
-		/* Fill the subflow specific structure - already alloc by ct */
-		mpsub = &ct->proto.tcp.mpflow
-		mpsub->addr_id = ((struct mp_join*)mptr)->addr_id
-		/* the direction is the same as mpct if rcvd token is the one from
-		 * original direction of mpct */
-		mpsub->rel_dir = (mpct->token[IP_CT_DIR_ORIGINAL] == token) | IP_CT_DIR_ORIGINAL;
-		mpsub->nonce[IP_CT_DIR_ORIGINAL] = ((struct mp_join*)mptr)->u.syn.nonce;
-		
-	}
-	else {
-		pr_debug("conntrack: unexpected token in mp_join segment, ct=%p\n",ct);
-		/* TODO: log */
-		return false;
-	}
-	return true;
-
-}
-
-
-/* Called at the end of the proto handling for new TCP packets (new connections) */
-void nf_ct_mptcp_new(struct nf_conn *ct, struct tcphdr *th)
-{
-	struct mptcp_option *mptr;
-    
-	if (!(mptr = nf_mptcp_get_ptr(th)))
-		return; /* no mptcp option present */
-
-	switch (_get_conntrack_index(th, &mptr)) {
-	case MPTCP_JOIN_SYN:
-		mpjoin_new(ct, th, mptr);
-		break;
-	case MPTCP_CAP_SYN:
-		mpcap_new(ct, th, mptr);
-		break;
-	default:
-		pr_debug("nf_ct_mptcp: unexpected mptcp option for connection or "
-				"subflow establishment, ct %p, option subkind %hhi", ct, mptr->kind);
-		return;
-	}
-}
 
 static char* mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
-		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
+		enum ip_conntrack_info ctinfo,
 		struct mptcp_option *mptr)
 {
 	enum mptcp_ct_state old_state, new_state;
 	struct nf_conntrack_tuple *tuple;
 	enum ip_conntrack_dir dir;
+	struct nf_conn_mptcp *mpct;
 	unsigned int index;
 	
-	old_state = ct->proto.tcp.mpmaster->state;
+	mpct = ct->proto.tcp.mpmaster;
+	old_state = mpct->state;
 	dir = CTINFO2DIR(ctinfo);
 	index = get_conntrack_index(th);
 	new_state = mptcp_conntracks[dir][index][old_state];
@@ -568,9 +590,6 @@ static char* mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 			index, mptcp_conntrack_names[old_state], mptcp_conntrack_names[new_state]);
 
 	switch (new_state) {
-	case MPTCP_CONNTRACK_SYN_SENT:
-		/* Should not happen: no reopen possible with MPCAP option  */
-		break;
 	case MPTCP_CONNTRACK_SYN_RECV:
 		/* Possible cases:
 		 *	- regular SYNACK answer: extract info from it (key, ..)
@@ -582,15 +601,10 @@ static char* mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 			 * open possible */
 			/* extract key for server */
 			pr_debug("nf_ct_mptcp_pkt: received synack, ct=%p, mpct=%p\n", ct, mpct);
-			if (((struct mp_capable*)mptr)->sender_key) {
 				mpct->key[dir] = ((struct mp_capable*)mptr)->sender_key;
 				nf_mptcp_key_sha1(((struct mp_capable*)mptr)->sender_key, 
 						&mpct->token[dir], &mptcp->last_dseq[dir]);
 				nf_mptcp_hash_insert(mpct, &mpct->token[dir]);
-			}
-				
-			else
-				return "nf_ct_mptcp: no key contained in SYNACK packet";
 		}
 
 		else if (index == MPTCP_CAP_ACK && dir == IP_CT_DIR_REPLY) {
@@ -610,89 +624,117 @@ static char* mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 		 *	- data being transfered
 		 *	- just-negociated connection
 		 */
+		ct->proto.tcp.mpflow.established = true;
 		if (index == MPTCP_CAP_ACK) { 
 			/* can be for both directions in case of simultaneous open */
 			/* check if keys match local data */
-			if (((struct mp_capable*)mptr)->sender_key == mpct->key[dir] && 
-					((struct mp_capable*)mptr)->receiver_key == mpct->key[!dir]) {
-				return NULL; /* OK */
+			if (!(((struct mp_capable*)mptr)->sender_key == mpct->key[dir] && 
+						((struct mp_capable*)mptr)->receiver_key == mpct->key[!dir])) {
+				pr_debug("nf_ct_mptcp: keys from final MP_CAPABLE ACK don't match:"
+						"local1=%lx, local2=%lx, remote1=%lx, remote2=%lx",
+						mpct->key[dir], 
+						((struct mp_capable*)mptr)->sender_key,
+						mpct->key[!dir],
+						((struct mp_capable*)mptr)->receiver_key);
+				if (LOG_INVALID(net, IPPROTO_TCP))
+					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+							"nf_ct_mptcp: keys from final MP_CAPABLE ACK don't match");
+				return -NF_ACCEPT;
 			}
-			return "nf_ct_mptcp: keys from final MP_CAPABLE ACK don't match";
 		}
 		break;
 	default:
 		break;
 	}
 	
-	return NULL;
+	if (new_state == MPTCP_CONNTRACK_CLOSE)
+		nf_mptcp_update_timers(mpct);
+	
+	return NF_ACCEPT;
 }
-/* for debug */
-static const char *const tcp_conntrack_names[] = {
-	"NONE", 	"SYN_SENT", 	"SYN_RECV", 	"ESTABLISHED", 	"FIN_WAIT", 	"CLOSE_WAIT", 	"LAST_ACK", 	"TIME_WAIT", 	"CLOSE", 	"SYN_SENT2", };
-
-static int mpsubflow_packet(struct nf_conn *ct, const struct tcphdr *th,
-		enum ip_conntrack_info ctinfo, struct nf_conn_mptcp *mpct,
-		struct mptcp_option *mptr)
+int nf_ct_mptcp_error(struct net *net, struct nf_conn *tmpl,
+		     struct sk_buff *skb,
+		     unsigned int dataoff,
+		     enum ip_conntrack_info *ctinfo,
+		     u_int8_t pf,
+		     unsigned int hooknum)
 {
-	enum mptcp_ct_state old_state, new_state;
-	struct nf_conntrack_tuple *tuple;
-	enum ip_conntrack_dir dir;
-	unsigned int index;
-	
-	old_state = ct->proto.tcp.mpflow_info.state;
-	dir = CTINFO2DIR(ctinfo);
-	index = get_conntrack_index(th);
-	new_state = tcp_conntracks[dir][index][old_state];
-	tuple = &ct->tuplehash[dir].tuple;
-		
-	pr_debug("nf_ct_mptcp_packet: received segmenttype %i, oldstate %s -> newstate %s\n",
-			index, tcp_conntrack_names[old_state], tcp_conntrack_names[new_state]);
-
-	switch (new_state) {
-	case TCP_CONNTRACK_SYN_SENT:
-		/* Client trying to open a subflow
-		 * - might be while in ESTABLISHED state (common case)
-		 * - might be when no subflow remains, in TIME_WAIT state (mptcp draft 3.3.3)	
-		 * FIXME: no reopen in MPTCP ?
-		 *   */
-		break;
-	case TCP_CONNTRACK_SYN_RECV:
-		/* SYN ACK received */
-		break;
-	case TCP_CONNTRACK_ESTABLISHED:
-		if (old_state == TCP_CONNTRACK_SYN_RECV &&
-				index != TCP_ACK_SET) {
-			/* Simulation of PREESTABLISHED state:
-			 * only an ack can be received after an mp_join handshake */
-		}
-		
-	default:
-		break;
-	}
-
-	return 0;
+	return tcp_error(net, tmpl, skb, dataoff, ctinfo, pf, hooknum);
 }
 
+/* TCP packet without connection tracker (new connections) */
+bool nf_ct_mptcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+		    unsigned int dataoff)
+{
+	struct mptcp_option *mptr;
+	int ret, ret_mp = 1;
+	const struct tcphdr *th;
+	struct tcphdr _tcph;
 
-void nf_ct_mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
-		enum ip_conntrack_info ctinfo)
+	/* initiate subflow's conntrack as usual */
+	ret = tcp_new(ct, skb, dataoff);
+	
+	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
+	BUG_ON(th == NULL);
+    
+	if (!(mptr = nf_mptcp_get_ptr(th)))
+		return ret; /* no mptcp option present */
+
+	/* Get mptcp packet type and return a pointer mptr to the right option in
+	 * skb */
+	switch (_get_conntrack_index(th, &mptr)) {
+	case MPTCP_CAP_SYN:
+		ret_mp = mpcap_new(ct, th, mptr);
+		break;
+	default:
+		/* FIXME */
+		break;
+	}
+	return ret && ret_mp;
+}
+
+int nf_ct_mptcp_packet(struct nf_conn *ct,
+		      const struct sk_buff *skb,
+		      unsigned int dataoff,
+		      enum ip_conntrack_info ctinfo,
+		      u_int8_t pf,
+		      unsigned int hooknum)
 {
 	struct mptcp_option *mptr;
 	u32 token;
 	u64 key, isdn;
 	struct nf_conn_mptcp *mpct;
-	
-	/* no mpmaster for the connection
-	 * - MPCAP: associated to mpct in new()
-	 * - Subflow: associated in new()
-	 * no mpmaster <=> not part of mptcp conn */
-	if (!(mpct = ct->proto.tcp.mpmaster))
-		return; 
+	int ret, ret_mp;
+	const struct tcphdr *th;
+	struct tcphdr _tcph;
+	enum mptcp_pkt_type index;
 
+	mpct = ct->proto.tcp.mpmaster;
 	/* mpct cannot be modified by several subflows at the same time */
 	spin_lock_bh(&mpct->lock);
+
+	/* first handle as single path packet */
+	ret = tcp_packet(ct, skb, dataoff, ctinfo, pf, hooknum);
+
+	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
+	BUG_ON(th == NULL);
+	/* Do not handle TCP packet with MPTCP FSM if:
+	 * no mpmaster for the connection:
+	 * - MPCAP: associated to mpct in new()
+	 * - Subflow: associated in new()
+	 *	no mpmaster <=> not part of mptcp conn 
+	 * OR if tcp_packet is not accepted anyway */
+	if (!mpct || ret <= 0)
+		return ret; 
+
+	/* a packet part of the mptcp connection has been received, a subflow
+	 * is alive, we are sure that the data connection must not die before
+	 * all are destroyed or the data connection is in CLOSED state */
+	nf_mptcp_delete_timer(mpct);
     
 	/* dispatching */
+	/* Get mptcp packet type and return a pointer mptr to the right option in
+	 * skb */
 	index = _get_conntrack_index(th, &mptr)
 	switch (index) {
 	/* mptcp packet: only transitions from MPTCP's FSM */
@@ -702,21 +744,38 @@ void nf_ct_mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	case MPTCP_DATA_ACK:
 	case MPTCP_DATA_FIN:
 	case MPTCP_FASTCLOSE:
-		mptcp_packet(ct, th, ctinfo, mpct, mptr);
-		break;
-	/* Subflow state not altered by all packet's types */
-	case MPTCP_JOIN_SYN:
-	case MPTCP_JOIN_SYNACK:
-	case MPTCP_JOIN_ACK:
-	case MPTCP_FAIL:
-	case MPTCP_NOOPT:
-		mpsubflow_packet(ct, th, ctinfo, mpct, mptr);
+		/* actual MPTCP-level connection tracking */
+		ret_mp = mptcp_packet(ct, th, ctinfo, mptr);
 	default:
 		break;
 	}
 	spin_unlock_bh(&mpct->lock);
+	
+	/* Take MPTCP decision into account only if negative */
+	if (ret_mp > 0):
+		return ret;
+	else
+		return ret_mp;
+
 }
 
+/* Called whenever a conntrack is going to be destroyed */
+void nf_ct_mptcp_destroy(struct nf_conn *ct) {
+	struct nf_conn_mptcp *mpct;
+	bool state_changed;
+	
+	mpct = ct->proto.tcp.mpmaster;
+	
+	spin_lock_bh(&mpct->lock);
+	state_changed = nf_mptcp_remove_subflow(mpct);
+	spin_unlock_bh(&mpct->lock);
+	
+	if (state_changed) {
+		nf_mptcp_update_timers(mpct);
+	}
+}
+
+#if 0
 static int __init nf_conntrack_mptcp_init(void)
 {
 	int i;
@@ -762,4 +821,5 @@ module_exit(nf_conntrack_mptcp_fini);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nicolas Maître <nimai@skynet.be>");
 MODULE_DESCRIPTION("MPTCP connection tracker");
+#endif
 

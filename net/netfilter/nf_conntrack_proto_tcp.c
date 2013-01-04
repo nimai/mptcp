@@ -28,7 +28,9 @@
 #include <net/netfilter/nf_log.h>
 #include <net/netfilter/ipv4/nf_conntrack_ipv4.h>
 #include <net/netfilter/ipv6/nf_conntrack_ipv6.h>
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 #include <linux/netfilter/nf_conntrack_mptcp.h>
+#endif
 
 
 /* "Be conservative in what you do,
@@ -44,6 +46,15 @@ static int nf_ct_tcp_loose __read_mostly = 1;
    ACK from the destination. If this number is reached, a shorter timer
    will be started. */
 static int nf_ct_tcp_max_retrans __read_mostly = 3;
+
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
+/* Compute and verify the hmac in SYNACK and ACK packet of MP_JOIN stage at
+ * the establishment of a new MPTCP subflow.
+ * If the hmac received does not match the local computation, the packet is 
+ * marked as INVALID.
+ */
+static int nf_ct_mptcp_verify_hash __read_mostly = 0;
+#endif
 
   /* FIXME: Examine ipfilter's timeouts and conntrack transitions more
      closely.  They're more complex. --RR */
@@ -85,6 +96,18 @@ static unsigned int tcp_timeouts[TCP_CONNTRACK_MAX] __read_mostly = {
 	[TCP_CONNTRACK_SYN_SENT2]	= 2 MINS,
 };
 
+#define sNO TCP_CONNTRACK_NONE
+#define sSS TCP_CONNTRACK_SYN_SENT
+#define sSR TCP_CONNTRACK_SYN_RECV
+#define sES TCP_CONNTRACK_ESTABLISHED
+#define sFW TCP_CONNTRACK_FIN_WAIT
+#define sCW TCP_CONNTRACK_CLOSE_WAIT
+#define sLA TCP_CONNTRACK_LAST_ACK
+#define sTW TCP_CONNTRACK_TIME_WAIT
+#define sCL TCP_CONNTRACK_CLOSE
+#define sS2 TCP_CONNTRACK_SYN_SENT2
+#define sIV TCP_CONNTRACK_MAX
+#define sIG TCP_CONNTRACK_IGNORE
 
 /* What TCP flags are set from RST/SYN/FIN/ACK. */
 enum tcp_bit_set {
@@ -96,7 +119,171 @@ enum tcp_bit_set {
 	TCP_NONE_SET,
 };
 
-
+/*
+ * The TCP state transition table needs a few words...
+ *
+ * We are the man in the middle. All the packets go through us
+ * but might get lost in transit to the destination.
+ * It is assumed that the destinations can't receive segments
+ * we haven't seen.
+ *
+ * The checked segment is in window, but our windows are *not*
+ * equivalent with the ones of the sender/receiver. We always
+ * try to guess the state of the current sender.
+ *
+ * The meaning of the states are:
+ *
+ * NONE:	initial state
+ * SYN_SENT:	SYN-only packet seen
+ * SYN_SENT2:	SYN-only packet seen from reply dir, simultaneous open
+ * SYN_RECV:	SYN-ACK packet seen
+ * ESTABLISHED:	ACK packet seen
+ * FIN_WAIT:	FIN packet seen
+ * CLOSE_WAIT:	ACK seen (after FIN)
+ * LAST_ACK:	FIN seen (after FIN)
+ * TIME_WAIT:	last ACK seen
+ * CLOSE:	closed connection (RST)
+ *
+ * Packets marked as IGNORED (sIG):
+ *	if they may be either invalid or valid
+ *	and the receiver may send back a connection
+ *	closing RST or a SYN/ACK.
+ *
+ * Packets marked as INVALID (sIV):
+ *	if we regard them as truly invalid packets
+ */
+static const u8 tcp_conntracks[2][6][TCP_CONNTRACK_MAX] = {
+	{
+/* ORIGINAL */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*syn*/	   { sSS, sSS, sIG, sIG, sIG, sIG, sIG, sSS, sSS, sS2 },
+/*
+ *	sNO -> sSS	Initialize a new connection
+ *	sSS -> sSS	Retransmitted SYN
+ *	sS2 -> sS2	Late retransmitted SYN
+ *	sSR -> sIG
+ *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
+ *			are errors. Receiver will reply with RST
+ *			and close the connection.
+ *			Or we are not in sync and hold a dead connection.
+ *	sFW -> sIG
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sSS	Reopened connection (RFC 1122).
+ *	sCL -> sSS
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*synack*/ { sIV, sIV, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*
+ *	sNO -> sIV	Too late and no reason to do anything
+ *	sSS -> sIV	Client can't send SYN and then SYN/ACK
+ *	sS2 -> sSR	SYN/ACK sent to SYN2 in simultaneous open
+ *	sSR -> sIG
+ *	sES -> sIG	Error: SYNs in window outside the SYN_SENT state
+ *			are errors. Receiver will reply with RST
+ *			and close the connection.
+ *			Or we are not in sync and hold a dead connection.
+ *	sFW -> sIG
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sIG
+ *	sCL -> sIG
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*
+ *	sNO -> sIV	Too late and no reason to do anything...
+ *	sSS -> sIV	Client migth not send FIN in this state:
+ *			we enforce waiting for a SYN/ACK reply first.
+ *	sS2 -> sIV
+ *	sSR -> sFW	Close started.
+ *	sES -> sFW
+ *	sFW -> sLA	FIN seen in both directions, waiting for
+ *			the last ACK.
+ *			Migth be a retransmitted FIN as well...
+ *	sCW -> sLA
+ *	sLA -> sLA	Retransmitted FIN. Remain in the same state.
+ *	sTW -> sTW
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*ack*/	   { sES, sIV, sES, sES, sCW, sCW, sTW, sTW, sCL, sIV },
+/*
+ *	sNO -> sES	Assumed.
+ *	sSS -> sIV	ACK is invalid: we haven't seen a SYN/ACK yet.
+ *	sS2 -> sIV
+ *	sSR -> sES	Established state is reached.
+ *	sES -> sES	:-)
+ *	sFW -> sCW	Normal close request answered by ACK.
+ *	sCW -> sCW
+ *	sLA -> sTW	Last ACK detected.
+ *	sTW -> sTW	Retransmitted last ACK. Remain in the same state.
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
+/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
+	},
+	{
+/* REPLY */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*syn*/	   { sIV, sS2, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sS2 },
+/*
+ *	sNO -> sIV	Never reached.
+ *	sSS -> sS2	Simultaneous open
+ *	sS2 -> sS2	Retransmitted simultaneous SYN
+ *	sSR -> sIV	Invalid SYN packets sent by the server
+ *	sES -> sIV
+ *	sFW -> sIV
+ *	sCW -> sIV
+ *	sLA -> sIV
+ *	sTW -> sIV	Reopened connection, but server may not do it.
+ *	sCL -> sIV
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*synack*/ { sIV, sSR, sIG, sIG, sIG, sIG, sIG, sIG, sIG, sSR },
+/*
+ *	sSS -> sSR	Standard open.
+ *	sS2 -> sSR	Simultaneous open
+ *	sSR -> sIG	Retransmitted SYN/ACK, ignore it.
+ *	sES -> sIG	Late retransmitted SYN/ACK?
+ *	sFW -> sIG	Might be SYN/ACK answering ignored SYN
+ *	sCW -> sIG
+ *	sLA -> sIG
+ *	sTW -> sIG
+ *	sCL -> sIG
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*fin*/    { sIV, sIV, sFW, sFW, sLA, sLA, sLA, sTW, sCL, sIV },
+/*
+ *	sSS -> sIV	Server might not send FIN in this state.
+ *	sS2 -> sIV
+ *	sSR -> sFW	Close started.
+ *	sES -> sFW
+ *	sFW -> sLA	FIN seen in both directions.
+ *	sCW -> sLA
+ *	sLA -> sLA	Retransmitted FIN.
+ *	sTW -> sTW
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*ack*/	   { sIV, sIG, sSR, sES, sCW, sCW, sTW, sTW, sCL, sIG },
+/*
+ *	sSS -> sIG	Might be a half-open connection.
+ *	sS2 -> sIG
+ *	sSR -> sSR	Might answer late resent SYN.
+ *	sES -> sES	:-)
+ *	sFW -> sCW	Normal close request answered by ACK.
+ *	sCW -> sCW
+ *	sLA -> sTW	Last ACK detected.
+ *	sTW -> sTW	Retransmitted last ACK.
+ *	sCL -> sCL
+ */
+/* 	     sNO, sSS, sSR, sES, sFW, sCW, sLA, sTW, sCL, sS2	*/
+/*rst*/    { sIV, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL, sCL },
+/*none*/   { sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV, sIV }
+	}
+};
 
 static bool tcp_pkt_to_tuple(const struct sk_buff *skb, unsigned int dataoff,
 			     struct nf_conntrack_tuple *tuple)
@@ -588,7 +775,7 @@ static const u8 tcp_valid_flags[(TCPHDR_FIN|TCPHDR_SYN|TCPHDR_RST|TCPHDR_ACK|
 };
 
 /* Protect conntrack agaist broken packets. Code taken from ipt_unclean.c.  */
-static int tcp_error(struct net *net, struct nf_conn *tmpl,
+int tcp_error(struct net *net, struct nf_conn *tmpl,
 		     struct sk_buff *skb,
 		     unsigned int dataoff,
 		     enum ip_conntrack_info *ctinfo,
@@ -639,16 +826,11 @@ static int tcp_error(struct net *net, struct nf_conn *tmpl,
 		return -NF_ACCEPT;
 	}
 
-#if defined(CONFIG_NF_CONNTRACK_MPTCP)
-	/* mptcp error checking */
-	/*mptcp_error(net,tmpl,skb,dataoff,ctinfo,pf,hooknum);*/
-#endif
-
 	return NF_ACCEPT;
 }
 
 /* Returns verdict for packet, or -1 for invalid. */
-static int tcp_packet(struct nf_conn *ct,
+int tcp_packet(struct nf_conn *ct,
 		      const struct sk_buff *skb,
 		      unsigned int dataoff,
 		      enum ip_conntrack_info ctinfo,
@@ -663,7 +845,13 @@ static int tcp_packet(struct nf_conn *ct,
 	struct tcphdr _tcph;
 	unsigned long timeout;
 	unsigned int index;
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
+	struct mptcp_subflow_info *mpsub;
+	struct nf_conn_mptcp *mpct;
 
+	mpsub = &ct->proto.tcp.mpflow;
+	mpct = &ct->proto.tcp.mpmaster;
+#endif
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
 
@@ -782,6 +970,75 @@ static int tcp_packet(struct nf_conn *ct,
 			nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 				  "nf_ct_tcp: invalid packet ignored ");
 		return NF_ACCEPT;
+	
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
+	case TCP_CONNTRACK_SYN_RECV:
+		struct mp_join *mptr;
+		u32 hash;
+		u64 key1, key2;
+		if (nf_ct_mptcp_verify_hash && index == TCP_SYNACK_SET 
+				&& (mptr = nf_mptcp_find_join(th))) {
+			/* MPJOIN SYNACK received
+			 * Check the hash */
+			key1 = mpct->key[nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+			key2 = mpct->key[!nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+			mpsub->nonce[dir] = be32_to_cpu(mptr->u.synack.nonce);
+			BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
+			/* effective hashing */
+			nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
+					(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
+			if (hash != be32_to_cpu(mptr->u.synack.mac)) {
+				pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
+							"local=%x, rem=%x",hash,be32_to_cpu(mptr->u.synack.mac));
+				if (LOG_INVALID(net, IPPROTO_TCP))
+					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+							"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
+				return -NF_ACCEPT;
+			}
+		}
+		break;
+	case TCP_CONNTRACK_ESTABLISHED:
+		if (mpct) {
+			if (!ct->proto.tcp.mpflow.established) {
+				/* Emulation of PREESTABLISHED state:
+				 * only an ack can be received after an mp_join handshake */
+				if (index != TCP_ACK_SET) {
+					if (LOG_INVALID(net, IPPROTO_TCP))
+						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+								"nf_ct_mptcp: invalid pkt in PREESTABLISHED state ");
+					return -NF_ACCEPT;
+				} else if (index == TCP_ACK_SET && !nf_mptcp_get_ptr(th)) {
+					ct->proto.tcp.mpflow.established = true;
+					/* increment the subflow counter and update the MPTCP FSM
+					 * state */
+					nf_mptcp_add_subflow(mpct);
+				}
+			} else if (nf_ct_mptcp_verify_hash &&
+					old_state == TCP_CONNTRACK_SYN_RECV &&
+					index == TCP_SYNACK_SET) {
+				struct mp_join *mptr;
+				u32 hash;
+				u64 key1, key2;
+				/* check hash */
+				key1 = mpct->key[nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+				key2 = mpct->key[!nf_mptcp_subdir2dir(&ct->proto.mpflow, dir)];
+				BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
+				/* effective hashing */
+				nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
+						(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
+				if (hash != be32_to_cpu(mptr->u.synack.mac)) {
+					pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
+							"local=%x, rem=%x",hash,be32_to_cpu(mptr->u.synack.mac));
+					if (LOG_INVALID(net, IPPROTO_TCP))
+						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+								"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
+					return -NF_ACCEPT;
+				}
+
+			}
+		}
+		break;
+#endif
 	case TCP_CONNTRACK_MAX:
 		/* Invalid packet */
 		pr_debug("nf_ct_tcp: Invalid dir=%i index=%u ostate=%u\n",
@@ -802,6 +1059,7 @@ static int tcp_packet(struct nf_conn *ct,
 					  "nf_ct_tcp: invalid RST ");
 			return -NF_ACCEPT;
 		}
+		
 		if (index == TCP_RST_SET
 		    && ((test_bit(IPS_SEEN_REPLY_BIT, &ct->status)
 			 && ct->proto.tcp.last_index == TCP_SYN_SET)
@@ -857,10 +1115,6 @@ static int tcp_packet(struct nf_conn *ct,
 	else
 		timeout = tcp_timeouts[new_state];
 
-#if defined(CONFIG_NF_CONNTRACK_MPTCP)
-	nf_ct_mptcp_packet(ct, th, index, newstate);
-#endif /* CONFIG_NF_CONNTRACK_MPTCP */
-
 	spin_unlock_bh(&ct->lock);
 
 	if (new_state != old_state)
@@ -891,7 +1145,7 @@ static int tcp_packet(struct nf_conn *ct,
 }
 
 /* Called when a new connection for this protocol found. */
-static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
+bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		    unsigned int dataoff)
 {
 	enum tcp_conntrack new_state;
@@ -925,6 +1179,61 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			ct->proto.tcp.seen[0].td_end;
 
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
+		
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
+		struct mptcp_option *mptr;
+		if (!(mptr = nf_mptcp_get_ptr(th)) && mptr->sub == MPTCP_SUB_JOIN) {
+			/* client is trying to establish a new subflow */
+			u32 token;
+			u64 key, isdn;
+			struct nf_conn_mptcp *mpct;
+			struct mp_subflow_info *mpsub;
+			
+			/* Is this a subflow of an existing MultipathTCP connection ? */
+			/* if we find an existing valid mptcp connection matching 
+			 * this conn's token
+			 * for the original direction, it is highly probable that the
+			 * sender is an end-host of that mptcp connection. */
+			token = __nf_mptcp_get_token((struct mp_join*)mptr);
+			mpct = nf_mptcp_hash_find(token);
+			spin_lock_bh(&mpct->lock);
+			/* the mptcp connection needs to be established before accepting any
+			 * new subflow */
+			if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
+						mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW)) {
+				pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
+				/* mark as RELATED */
+				__set_bit(IPS_EXPECTED_BIT, &ct->status);
+				/* link to parent mptcp state */
+				ct->proto.tcp.mpmaster = mpct;
+				/* Fill the subflow specific structure - already alloc by ct */
+				mpsub = &ct->proto.tcp.mpflow;
+				mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
+				/* the direction is the same as mpct if rcvd token is the one from
+				 * original direction of mpct */
+				mpsub->rel_dir = (mpct->token[IP_CT_DIR_ORIGINAL] == token) | 
+					IP_CT_DIR_ORIGINAL;
+				mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
+					((struct mp_join*)mptr)->u.syn.nonce;
+				/* for preestablished state */
+				mpsub->established = false;
+			} else if (mpct) {
+				pr_debug("conntrack: mp_join's token expected but MPTCP "
+						"connection not established, ct=%p\n",ct);
+			}
+			else {
+				pr_debug("conntrack: unexpected token in mp_join segment,"
+						"ct=%p\n",ct);
+				if (LOG_INVALID(net, IPPROTO_TCP))
+					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
+							"nf_ct_mptcp: unexpected token=%x in mp_join "
+							"segment, ct=%p\n",token,ct);
+				spin_unlock_bh(&mpct->lock);
+				return -NF_ACCEPT;
+			}
+			spin_unlock_bh(&mpct->lock);
+		}
+#endif /* CONFIG_NF_CONNTRACK_MPTCP */
 	} else if (nf_ct_tcp_loose == 0) {
 		/* Don't try to pick up connections. */
 		return false;
@@ -961,11 +1270,6 @@ static bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 sender->td_scale,
 		 receiver->td_end, receiver->td_maxend, receiver->td_maxwin,
 		 receiver->td_scale);
-
-#if defined(CONFIG_NF_CONNTRACK_MPTCP)
-	nf_ct_mptcp_new(ct, th);
-#endif /* CONFIG_NF_CONNTRACK_MPTCP */
-
 	return true;
 }
 
@@ -1177,6 +1481,15 @@ static struct ctl_table tcp_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	{
+		.procname	= "nf_conntrack_mptcp_verify_hash",
+		.data		= &nf_ct_mptcp_verify_hash,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 	{ }
 };
 
@@ -1273,6 +1586,15 @@ static struct ctl_table tcp_compat_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	{
+		.procname	= "ip_conntrack_mptcp_verify_hash",
+		.data		= &nf_ct_mptcp_verify_hash,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 	{ }
 };
 #endif /* CONFIG_NF_CONNTRACK_PROC_COMPAT */
@@ -1287,9 +1609,16 @@ struct nf_conntrack_l4proto nf_conntrack_l4proto_tcp4 __read_mostly =
 	.invert_tuple 		= tcp_invert_tuple,
 	.print_tuple 		= tcp_print_tuple,
 	.print_conntrack 	= tcp_print_conntrack,
+#if defined(CONFIG_NF_CT_MPTCP)
+	.packet 		= nf_ct_mptcp_packet,
+	.new 			= nf_ct_mptcp_new,
+	.error			= nf_ct_mptcp_error,
+	.destroy		= nf_ct_mptcp_destroy,
+#else
 	.packet 		= tcp_packet,
 	.new 			= tcp_new,
 	.error			= tcp_error,
+#endif
 #if defined(CONFIG_NF_CT_NETLINK) || defined(CONFIG_NF_CT_NETLINK_MODULE)
 	.to_nlattr		= tcp_to_nlattr,
 	.nlattr_size		= tcp_nlattr_size,
@@ -1319,9 +1648,16 @@ struct nf_conntrack_l4proto nf_conntrack_l4proto_tcp6 __read_mostly =
 	.invert_tuple 		= tcp_invert_tuple,
 	.print_tuple 		= tcp_print_tuple,
 	.print_conntrack 	= tcp_print_conntrack,
+#if defined(CONFIG_NF_CT_MPTCP)
+	.packet 		= nf_ct_mptcp_packet,
+	.new 			= nf_ct_mptcp_new,
+	.error			= nf_ct_mptcp_error,
+	.destroy		= nf_ct_mptcp_destroy,
+#else
 	.packet 		= tcp_packet,
 	.new 			= tcp_new,
 	.error			= tcp_error,
+#endif
 #if defined(CONFIG_NF_CT_NETLINK) || defined(CONFIG_NF_CT_NETLINK_MODULE)
 	.to_nlattr		= tcp_to_nlattr,
 	.nlattr_size		= tcp_nlattr_size,
