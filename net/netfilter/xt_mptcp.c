@@ -3,86 +3,75 @@
  *	written by Nicolas Maître <nimai@skynet.be>, 2012
  */
 
-#include <linux/ip.h>
-#include <linux/ipv6.h>
 #include <linux/module.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/x_tables.h>
-#include <net/ipv6.h>
 #include <net/tcp.h>
+#include <net/mptcp.h>
 
 #include <linux/netfilter/xt_mptcp.h>
 #include <linux/netfilter/nf_conntrack_mptcp.h>
 
 
-static bool mptcp_mt4(const struct sk_buff *skb, struct xt_action_param *par)
+static bool mptcp_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_mptcp_mtinfo *info = par->matchinfo;
-	const struct iphdr *iph = ip_hdr(skb);
+	const struct tcphdr *th;
+	struct tcphdr _tcph;
+    bool mptcp_present;
+	struct mptcp_option *dss;
+	
+	th = skb_header_pointer(skb, par->thoff, sizeof(_tcph), &_tcph);
+	mptcp_present = !!nf_mptcp_get_ptr(th);
 
-    const bool mptcp_present = 
-        !!nf_mptcp_get_ptr((const struct tcphdr*)(iph + 1));
-
-	printk(KERN_DEBUG
-	       "xt_mptcp: IN=%s OUT=%s "
-           "SRC=%pI4 DST=%pI4 MPTCP_present=%s \n",
-	       (par->in != NULL) ? par->in->name : "",
-	       (par->out != NULL) ? par->out->name : "",
-	       &iph->saddr, &iph->daddr,
-           mptcp_present?"true":"false");
-
-    printk(KERN_DEBUG "match flags: %u ?= %u, f&c: %u", info->flags, XT_MPTCP_PRESENT, info->flags&XT_MPTCP_PRESENT);
-/*	if (info->flags & XT_MPTCP_PRESENT) */
-		if (mptcp_present) {
-			printk(KERN_NOTICE "mptcp in use - match\n");
-			return true;
-        }
-    /*
-	if (info->flags & XT_MPTCP_PRESENT)
-		if (mptcp_present ^
-		    !!(info->flags & XT_MPTCP_PRESENT_INV)) {
-			printk(KERN_NOTICE "mptcp in use - match\n");
-			return true;
+	if (!mptcp_present)
+		return false;
+	
+	if (info->subtypes & XT_MPCAPABLE_PRESENT) {
+		if (!nf_mptcp_find_subtype(th, MPTCP_SUB_CAPABLE) ^
+				!!(info->invflags & XT_MPCAPABLE_PRESENT)) {
+			pr_debug("Not matching MP_CAPABLE packet.");
+			return false;
 		}
-    */
-	printk(KERN_NOTICE "mptcp NOT in use - no match\n");
-	return false;
+	}
+
+	if (info->subtypes & XT_MPJOIN_PRESENT) {
+		if (!nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN) ^
+				!!(info->invflags & XT_MPJOIN_PRESENT)) {
+			pr_debug("Not matching MP_JOIN packet.");
+			return false;
+		}
+	}
+
+	if (info->subtypes & XT_DSS_FLAGS) {
+		if ((!(dss = nf_mptcp_find_subtype(th, MPTCP_SUB_DSS)) &&
+					/* does masked dssflags from pkt match flags to compare?*/
+					((((unsigned char *)dss)[3] & info->dss_flg_mask) == info->dss_flg_cmp)) ^
+				!!(info->invflags & XT_DSS_FLAGS)) {
+			pr_debug("Not matching DSS flags %hhx (from packet) to %hhx.",
+					((unsigned char *)dss)[3] & info->dss_flg_mask, info->dss_flg_cmp);
+			return false;
+		}
+	}
+	pr_debug("Match found.");
+	return true;
 }
 
-static bool mptcp_mt6(const struct sk_buff *skb, struct xt_action_param *par)
-{
-	const struct xt_mptcp_mtinfo *info = par->matchinfo;
-	const struct ipv6hdr *iph = ipv6_hdr(skb);
-    
-    const bool mptcp_present = 
-        !!nf_mptcp_get_ptr((const struct tcphdr*)(iph + 1));
-
-	printk(KERN_INFO
-	       "xt_mptcp: IN=%s OUT=%s "
-           "SRC=%pI6 DST=%pI6 MPTCP_present=%s \n",
-	       (par->in != NULL) ? par->in->name : "",
-	       (par->out != NULL) ? par->out->name : "",
-	       &iph->saddr, &iph->daddr,
-           mptcp_present ? "true":"false");
-
-	/*if (info->flags & XT_MPTCP_PRESENT) {*/
-		if (mptcp_present) {
-			printk(KERN_NOTICE "mptcp in use - match\n");
-			return true;
-        }
-
-	printk(KERN_NOTICE "mptcp NOT in use - no match\n");
-	return false;
-}
 
 static int mptcp_mt_check(const struct xt_mtchk_param *par)
 {
-	/*const struct xt_mptcp_mtinfo *info = par->matchinfo;*/
+	const struct xt_mptcp_mtinfo *info = par->matchinfo;
 
 	printk(KERN_INFO "xt_mptcp: Added a rule with -m mptcp in "
 	       "the %s table; this rule is reachable through hooks 0x%x\n",
 	       par->table, par->hook_mask);
 
+	if ((info->subtypes & (XT_MPCAPABLE_PRESENT | XT_MPJOIN_PRESENT ))
+		&& (info->subtypes & (XT_DSS_FLAGS | XT_MPJOIN_PRESENT))
+		&& (info->subtypes & (XT_DSS_FLAGS | XT_MPCAPABLE_PRESENT))) {
+		pr_info("incompatible combination: no packet will match that rule\n");
+		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -97,7 +86,7 @@ static struct xt_match mptcp_mt_reg[] __read_mostly = {
 		.revision   = 0,
 		.family     = NFPROTO_IPV4,
         .proto		= IPPROTO_TCP,
-		.match      = mptcp_mt4,
+		.match      = mptcp_mt,
 		.checkentry = mptcp_mt_check,
 		.destroy    = mptcp_mt_destroy,
 		.matchsize  = XT_ALIGN(sizeof(struct xt_mptcp_mtinfo)),
@@ -108,7 +97,7 @@ static struct xt_match mptcp_mt_reg[] __read_mostly = {
 		.revision   = 0,
 		.family     = NFPROTO_IPV6,
         .proto		= IPPROTO_TCP,
-		.match      = mptcp_mt6,
+		.match      = mptcp_mt,
 		.checkentry = mptcp_mt_check,
 		.destroy    = mptcp_mt_destroy,
 		.matchsize  = XT_ALIGN(sizeof(struct xt_mptcp_mtinfo)),

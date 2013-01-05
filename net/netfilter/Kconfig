@@ -884,10 +884,10 @@ config NETFILTER_XT_MATCH_MARK
 
 config NETFILTER_XT_MATCH_MPTCP
     tristate '"mptcp" match support'
-    depends on NETFILTER_XTABLES && NF_CONNTRACK_MPTCP
+    depends on NETFILTER_XTABLES
     ---help---
-    The xt_mptcp module allows you to match TCP segments parts of a MPTCP
-    connection.
+    The xt_mptcp module allows you to match TCP segments with the MPTCP
+	option and against some subtypes.
 
 config NETFILTER_XT_MATCH_MULTIPORT
 	tristate '"multiport" Multiple port match support'

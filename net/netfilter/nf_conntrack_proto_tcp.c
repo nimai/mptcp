@@ -53,7 +53,7 @@ static int nf_ct_tcp_max_retrans __read_mostly = 3;
  * If the hmac received does not match the local computation, the packet is 
  * marked as INVALID.
  */
-static int nf_ct_mptcp_verify_hash __read_mostly = 0;
+static int nf_ct_mptcp_verify_hash __read_mostly = 1;
 #endif
 
   /* FIXME: Examine ipfilter's timeouts and conntrack transitions more
@@ -856,6 +856,9 @@ int tcp_packet(struct nf_conn *ct,
 
 	mpsub = &ct->proto.tcp.mpflow;
 	mpct = ct->proto.tcp.mpmaster;
+	if (mpct)
+		/* mpct cannot be modified by several subflows at the same time */
+		spin_lock_bh(&mpct->lock);
 #endif
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
@@ -979,7 +982,7 @@ int tcp_packet(struct nf_conn *ct,
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	case TCP_CONNTRACK_SYN_RECV:
 		if (nf_ct_mptcp_verify_hash && index == TCP_SYNACK_SET 
-				&& (mptr = nf_mptcp_find_join(th))) {
+				&& (mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
 			/* MPJOIN SYNACK received
 			 * Check the hash */
 			key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
@@ -991,10 +994,11 @@ int tcp_packet(struct nf_conn *ct,
 					(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
 			if (hash != be32_to_cpu(mptr->u.synack.mac)) {
 				pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
-							"local=%x, rem=%x",hash,be32_to_cpu(mptr->u.synack.mac));
+							"local=%x, rem=%x\n",hash,be32_to_cpu(mptr->u.synack.mac));
 				if (LOG_INVALID(net, IPPROTO_TCP))
 					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 							"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
+				spin_unlock_bh(&mpct->lock);
 				return -NF_ACCEPT;
 			}
 		}
@@ -1008,6 +1012,7 @@ int tcp_packet(struct nf_conn *ct,
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid pkt in PREESTABLISHED state ");
+					spin_unlock_bh(&mpct->lock);
 					return -NF_ACCEPT;
 				} else if (index == TCP_ACK_SET && !nf_mptcp_get_ptr(th)) {
 					ct->proto.tcp.mpflow.established = true;
@@ -1015,7 +1020,7 @@ int tcp_packet(struct nf_conn *ct,
 			} else if (nf_ct_mptcp_verify_hash &&
 					old_state == TCP_CONNTRACK_SYN_RECV &&
 					index == TCP_SYNACK_SET &&
-					(mptr = nf_mptcp_find_join(th))) {
+					(mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
 				/* check hash */
 				key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
 				key2 = mpct->d[!nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
@@ -1025,10 +1030,11 @@ int tcp_packet(struct nf_conn *ct,
 						(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
 				if (hash != be32_to_cpu(mptr->u.synack.mac)) {
 					pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
-							"local=%x, rem=%x",hash,be32_to_cpu(mptr->u.synack.mac));
+							"local=%x, rem=%x\n",hash,be32_to_cpu(mptr->u.synack.mac));
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
+					spin_unlock_bh(&mpct->lock);
 					return -NF_ACCEPT;
 				}
 
@@ -1079,6 +1085,9 @@ int tcp_packet(struct nf_conn *ct,
 		/* Keep compilers happy. */
 		break;
 	}
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	spin_unlock_bh(&mpct->lock);
+#endif
 
 	if (!tcp_in_window(ct, &ct->proto.tcp, dir, index,
 			   skb, dataoff, th, pf)) {
@@ -1185,7 +1194,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-		if (!(mptr = nf_mptcp_get_ptr(th)) && mptr->sub == MPTCP_SUB_JOIN) {
+		if ((mptr = nf_mptcp_get_ptr(th)) && mptr->sub == MPTCP_SUB_JOIN) {
 			/* client is trying to establish a new subflow */
 			
 			/* Is this a subflow of an existing MultipathTCP connection ? */
@@ -1610,7 +1619,7 @@ struct nf_conntrack_l4proto nf_conntrack_l4proto_tcp4 __read_mostly =
 	.invert_tuple 		= tcp_invert_tuple,
 	.print_tuple 		= tcp_print_tuple,
 	.print_conntrack 	= tcp_print_conntrack,
-#if defined(CONFIG_NF_CT_MPTCP)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	.packet 		= nf_ct_mptcp_packet,
 	.new 			= nf_ct_mptcp_new,
 	.error			= nf_ct_mptcp_error,
@@ -1649,7 +1658,7 @@ struct nf_conntrack_l4proto nf_conntrack_l4proto_tcp6 __read_mostly =
 	.invert_tuple 		= tcp_invert_tuple,
 	.print_tuple 		= tcp_print_tuple,
 	.print_conntrack 	= tcp_print_conntrack,
-#if defined(CONFIG_NF_CT_MPTCP)
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	.packet 		= nf_ct_mptcp_packet,
 	.new 			= nf_ct_mptcp_new,
 	.error			= nf_ct_mptcp_error,

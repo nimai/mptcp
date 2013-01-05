@@ -13,7 +13,6 @@
 enum mptcp_ct_state {
 	MPTCP_CONNTRACK_NONE,
 	MPTCP_CONNTRACK_SYN_SENT,
-	MPTCP_CONNTRACK_SYN_SENT2,
 	MPTCP_CONNTRACK_SYN_RECV,
 	MPTCP_CONNTRACK_ESTABLISHED,
 	MPTCP_CONNTRACK_NO_SUBFLOW,
@@ -22,9 +21,10 @@ enum mptcp_ct_state {
 	MPTCP_CONNTRACK_CLOSEWAIT,
 	MPTCP_CONNTRACK_LASTACK,
 	MPTCP_CONNTRACK_CLOSED,
+	MPTCP_CONNTRACK_SYN_SENT2,
+	MPTCP_CONNTRACK_FALLBACK,
 	MPTCP_CONNTRACK_MAX,
-	MPTCP_CONNTRACK_IGNORE,
-	MPTCP_CONNTRACK_FALLBACK
+	MPTCP_CONNTRACK_IGNORE
 };
 
 
@@ -79,7 +79,7 @@ void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
 
 
 /* general use functions for MPTCP */
-struct mp_join *nf_mptcp_find_join(const struct tcphdr *th);
+struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, unsigned int subtype);
 u32 nf_mptcp_get_token(const struct tcphdr *th);
 u32 __nf_mptcp_get_token(struct mp_join *mpj);
 

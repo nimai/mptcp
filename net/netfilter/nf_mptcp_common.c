@@ -48,8 +48,11 @@ struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
 				return NULL;
 			if (opsize > length)
 				return NULL;	/* don't parse partial options */
-			if (opcode == TCPOPT_MPTCP)
+			if (opcode == TCPOPT_MPTCP) {
+				printk(KERN_DEBUG "find_mptcp_option: FOUND, kind=%u, size=%u\n", 
+						((struct mptcp_option*)(ptr-2))->sub,opsize);
                 return (struct mptcp_option*)(ptr-2);
+			}
             ptr += opsize-2;
 		    length -= opsize;
         }
@@ -84,6 +87,7 @@ u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr)
 				return NULL;
 			if (opsize > length)
 				return NULL;	/* don't parse partial options */
+			printk(KERN_DEBUG "next_opt: opcode=%u\n", opcode); 
             return ptr-2;
         }
     }
@@ -92,15 +96,12 @@ u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr)
 EXPORT_SYMBOL(nf_mptcp_next_opt);
 
 /* Same as next_opt but returns only the MPTCP options */
-struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *hptr)
+struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *opt)
 {
-	u8 *opt, *ptr = hptr;
-	while ((opt = nf_mptcp_next_opt(th, ptr)) != NULL) {
-		if (*opt == TCPOPT_MPTCP)
-			return (struct mptcp_option*)opt;
-		ptr = opt;
-	}
-	return NULL;
+	do {
+		opt = (u8*)nf_mptcp_next_mpopt(th, (u8*)opt);
+	} while (opt && ((struct mptcp_option*)opt)->sub != TCPOPT_MPTCP);
+	return (struct mptcp_option*)opt;
 }
 EXPORT_SYMBOL(nf_mptcp_next_mpopt);
 
@@ -109,3 +110,21 @@ struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th)
 	return nf_mptcp_next_mpopt(th, (u8*)((size_t)th+sizeof(struct tcphdr)));
 }
 EXPORT_SYMBOL(nf_mptcp_first_mpopt);
+
+/* Search for the JOIN subkind in a MPTCP segment 
+ * Return a pointer to the JOIN subtype in the skb
+ * or NULL if it can't be found 
+ * */
+struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, unsigned int subtype)
+{
+	struct mptcp_option *opt;
+	/* iterates over the mptcp options */
+	opt = nf_mptcp_first_mpopt(th);
+	while (opt && opt->sub != subtype) {
+		opt = nf_mptcp_next_mpopt(th, (u8*)opt);
+	}
+	return opt;
+}
+EXPORT_SYMBOL(nf_mptcp_find_subtype);
+
+
