@@ -192,6 +192,21 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 				    par->family, &tuple))
 		goto hotdrop;
 
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	if (info->flags & XT_CONNLIMIT_MPTCP) {
+		/* limit the subflows per MPTCP connection */
+		if (tuple_ptr->dst.protonum == IPPROTO_TCP &&
+				ct->proto.tcp.mpmaster) {
+			connections = ct->proto.tcp.mpmaster->counter_sub;
+			/* no need to count connections */
+			goto counted;
+		} else {
+			/* XT_CONNLIMIT_MPTCP is exclusive with other flags */
+			return false;
+		}
+	}
+#endif
+
 	if (par->family == NFPROTO_IPV6) {
 		const struct ipv6hdr *iph = ipv6_hdr(skb);
 		memcpy(&addr.ip6, (info->flags & XT_CONNLIMIT_DADDR) ?
@@ -207,6 +222,7 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	                         &info->mask, par->family);
 	spin_unlock_bh(&info->data->lock);
 
+ counted:
 	if (connections < 0)
 		/* kmalloc failed, drop it entirely */
 		goto hotdrop;
