@@ -861,6 +861,12 @@ resolve_normal_ct(struct net *net, struct nf_conn *tmpl,
 			pr_debug("nf_conntrack_in: related packet for %p\n",
 				 ct);
 			*ctinfo = IP_CT_RELATED;
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+		} else if (test_bit(IPS_NEW_SUBFLOW_BIT, &ct->status)) {
+			pr_debug("nf_conntrack_in: new subflow packet for %p\n",
+				 ct);
+			*ctinfo = IP_MPCT_SUBFLOW;
+#endif
 		} else {
 			pr_debug("nf_conntrack_in: new packet for %p\n", ct);
 			*ctinfo = IP_CT_NEW;

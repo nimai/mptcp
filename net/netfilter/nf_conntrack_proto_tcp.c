@@ -1194,54 +1194,56 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-		if ((mptr = nf_mptcp_get_ptr(th)) && mptr->sub == MPTCP_SUB_JOIN) {
-			/* client is trying to establish a new subflow */
-			
-			/* Is this a subflow of an existing MultipathTCP connection ? */
-			/* if we find an existing valid mptcp connection matching 
-			 * this conn's token
-			 * for the original direction, it is highly probable that the
-			 * sender is an end-host of that mptcp connection. */
-			token = __nf_mptcp_get_token((struct mp_join*)mptr);
-			mpct = nf_mptcp_hash_find(token);
-			spin_lock_bh(&mpct->lock);
-			/* the mptcp connection needs to be established before accepting any
-			 * new subflow */
-			if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
-						mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW)) {
-				pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
-				/* mark as RELATED */
-				__set_bit(IPS_EXPECTED_BIT, &ct->status);
-				/* link to parent mptcp state */
-				ct->proto.tcp.mpmaster = mpct;
-				/* Fill the subflow specific structure - already alloc by ct */
-				mpsub = &ct->proto.tcp.mpflow;
-				mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
-				/* the direction is the same as mpct if rcvd token is the one from
-				 * original direction of mpct */
-				mpsub->rel_dir = (mpct->d[IP_CT_DIR_ORIGINAL].token == token) | 
-					IP_CT_DIR_ORIGINAL;
-				mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
-					((struct mp_join*)mptr)->u.syn.nonce;
-				/* for preestablished state */
-				mpsub->established = false;
-				/* increment the subflow counter and update the MPTCP FSM
-				* state. Do this here instead of when it establishes, so that 
-				* if it is reset before establishment, the remove subflow 
-				* doesnt decrement for nothing */
-				nf_mptcp_add_subflow(mpct);
-			} else if (mpct) {
-				pr_debug("conntrack: mp_join's token expected but MPTCP "
-						"connection not established, ct=%p\n",ct);
-			}
-			else {
-				pr_debug("conntrack: unexpected token in mp_join segment,"
-						"ct=%p\n",ct);
-				spin_unlock_bh(&mpct->lock);
-				return false;
-			}
-			spin_unlock_bh(&mpct->lock);
+		if (!(mptr = nf_mptcp_get_ptr(th)) || mptr->sub != MPTCP_SUB_JOIN)
+			goto nomptcp;
+		/* client is trying to establish a new subflow */
+
+		/* Is this a subflow of an existing MultipathTCP connection ? */
+		/* if we find an existing valid mptcp connection matching 
+		 * this conn's token
+		 * for the original direction, it is highly probable that the
+		 * sender is an end-host of that mptcp connection. */
+		token = __nf_mptcp_get_token((struct mp_join*)mptr);
+		mpct = nf_mptcp_hash_find(token);
+		spin_lock_bh(&mpct->lock);
+		/* the mptcp connection needs to be established before accepting any
+		 * new subflow */
+		if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
+					mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW)) {
+			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
+			/* mark as RELATED */
+			/*__set_bit(IPS_EXPECTED_BIT, &ct->status);*/
+			__set_bit(IPS_NEW_SUBFLOW_BIT, &ct->status);
+			/* link to parent mptcp state */
+			ct->proto.tcp.mpmaster = mpct;
+			/* Fill the subflow specific structure - already alloc by ct */
+			mpsub = &ct->proto.tcp.mpflow;
+			mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
+			/* the direction is the same as mpct if rcvd token is the one from
+			 * original direction of mpct */
+			mpsub->rel_dir = (mpct->d[IP_CT_DIR_ORIGINAL].token == token) | 
+				IP_CT_DIR_ORIGINAL;
+			mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
+				((struct mp_join*)mptr)->u.syn.nonce;
+			/* for preestablished state */
+			mpsub->established = false;
+			/* increment the subflow counter and update the MPTCP FSM
+			 * state. Do this here instead of when it establishes, so that 
+			 * if it is reset before establishment, the remove subflow 
+			 * doesnt decrement for nothing */
+			nf_mptcp_add_subflow(mpct);
+		} else if (mpct) {
+			pr_debug("conntrack: mp_join's token expected but MPTCP "
+					"connection not established, ct=%p\n",ct);
 		}
+		else {
+			pr_debug("conntrack: unexpected token in mp_join segment,"
+					"ct=%p\n",ct);
+			spin_unlock_bh(&mpct->lock);
+			return false;
+		}
+		spin_unlock_bh(&mpct->lock);
+nomptcp:
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 	} else if (nf_ct_tcp_loose == 0) {
 		/* Don't try to pick up connections. */

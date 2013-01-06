@@ -11,6 +11,12 @@ enum ip_conntrack_info {
 	   (in either direction). */
 	IP_CT_RELATED,
 
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	/* Like RELATED, but the existing connection is a higher-level connection
+	 * such as Multipath TCP's, making of this connection a new verified subflow */
+	IP_MPCT_SUBFLOW,
+#endif
+
 	/* Started a new connection to track (only
            IP_CT_DIR_ORIGINAL); may be a retransmission. */
 	IP_CT_NEW,
@@ -20,6 +26,9 @@ enum ip_conntrack_info {
 
 	IP_CT_ESTABLISHED_REPLY = IP_CT_ESTABLISHED + IP_CT_IS_REPLY,
 	IP_CT_RELATED_REPLY = IP_CT_RELATED + IP_CT_IS_REPLY,
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	IP_MPCT_SUBFLOW_REPLY = IP_MPCT_SUBFLOW_REPLY + IP_CT_IS_REPLY,
+#endif
 	IP_CT_NEW_REPLY = IP_CT_NEW + IP_CT_IS_REPLY,	
 	/* Number of distinct IP_CT types (no NEW in reply dirn). */
 	IP_CT_NUMBER = IP_CT_IS_REPLY * 2 - 1
@@ -83,6 +92,12 @@ enum ip_conntrack_status {
 	/* Conntrack is a fake untracked entry */
 	IPS_UNTRACKED_BIT = 12,
 	IPS_UNTRACKED = (1 << IPS_UNTRACKED_BIT),
+
+#ifdef CONFIG_NF_CONNTRACK_MPTCP
+	/* Conntrack is verified as part of a MPTCP connection */
+	IPS_NEW_SUBFLOW_BIT = 12,
+	IPS_NEW_SUBFLOW = (1 << IPS_NEW_SUBFLOW_BIT),
+#endif
 };
 
 /* Connection tracking event types */
