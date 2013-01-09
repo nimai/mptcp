@@ -3,6 +3,7 @@
  * */
 #include <linux/module.h>
 #include <net/mptcp.h>
+#include <linux/netfilter/nf_conntrack_mptcp.h>
 
 
 /* Look for the presence of MPTCP in the set of TCP options from a given
@@ -62,54 +63,50 @@ struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
 }
 EXPORT_SYMBOL(nf_mptcp_get_ptr);
 
-/* Get a pointer to the next (non-EOL/NOP) option in the TCP header.
+/* Get a pointer to the first met MPTCP option in the TCP header.
  * hptr is a pointer to a valid TCP option
  * Return NULL if no more option in the header */
-u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr)
+struct mptcp_option *nf_mptcp_get_mpopt(const struct tcphdr *th, u8 *hptr, 
+		unsigned int *len, short *mptcptype)
 {
 	u8 *ptr = hptr;
 	/* length is the size of the rest of the TCP header from option pointed by
 	 * ptr to the end*/
-	int length = (th->doff * 4) - ((size_t)ptr-sizeof(struct tcphdr));
-	while (length > 0) {
-		int opcode = *ptr++;
+	int length = (th->doff * 4) - (ptr-(u8*)th);
+	*mptcptype = -1;
+	pr_debug("MPOPT: length=%i, ptr=%p\n",length,ptr);
+	while (length >= 0) {
+		int opcode = *ptr;
 		int opsize;
+		pr_debug("opcode=%i\n",opcode);
 
         switch (opcode) {
         case TCPOPT_EOL:
             return NULL;
         case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
             length--;
+			ptr++;
             continue;
         default:
-			opsize = *ptr++;
+			opsize = *(ptr+1);
 			if (opsize < 2) /* "silly options" */
 				return NULL;
 			if (opsize > length)
 				return NULL;	/* don't parse partial options */
-			printk(KERN_DEBUG "next_opt: opcode=%u\n", opcode); 
-            return ptr-2;
+			pr_debug("nextopt: opcode=%u, opsize=%u\n", opcode, opsize); 
+			if (opcode != TCPOPT_MPTCP) {
+				ptr += opsize;
+				length -= opsize;
+				continue;
+			}
+			/* we have an MPTCP option */
+			*len = opsize;
+			*mptcptype = ((struct mptcp_option*)ptr)->sub;
+            return (struct mptcp_option*)ptr;
         }
     }
     return NULL;
 }
-EXPORT_SYMBOL(nf_mptcp_next_opt);
-
-/* Same as next_opt but returns only the MPTCP options */
-struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *opt)
-{
-	do {
-		opt = (u8*)nf_mptcp_next_mpopt(th, (u8*)opt);
-	} while (opt && ((struct mptcp_option*)opt)->sub != TCPOPT_MPTCP);
-	return (struct mptcp_option*)opt;
-}
-EXPORT_SYMBOL(nf_mptcp_next_mpopt);
-
-struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th)
-{
-	return nf_mptcp_next_mpopt(th, (u8*)((size_t)th+sizeof(struct tcphdr)));
-}
-EXPORT_SYMBOL(nf_mptcp_first_mpopt);
 
 /* Search for the JOIN subkind in a MPTCP segment 
  * Return a pointer to the JOIN subtype in the skb
@@ -117,14 +114,14 @@ EXPORT_SYMBOL(nf_mptcp_first_mpopt);
  * */
 struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, unsigned int subtype)
 {
-	struct mptcp_option *opt;
+	u8 *opt;
+	unsigned int len;
+	short sub;
 	/* iterates over the mptcp options */
-	opt = nf_mptcp_first_mpopt(th);
-	while (opt && opt->sub != subtype) {
-		opt = nf_mptcp_next_mpopt(th, (u8*)opt);
+	for_each_mpopt(opt, sub, len, th) {
+		if (sub == subtype)
+			return (struct mptcp_option*)opt;
 	}
-	return opt;
+	return NULL;
 }
-EXPORT_SYMBOL(nf_mptcp_find_subtype);
-
 

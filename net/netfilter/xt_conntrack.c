@@ -171,6 +171,11 @@ conntrack_mt(const struct sk_buff *skb, struct xt_action_param *par,
 
 	ct = nf_ct_get(skb, &ctinfo);
 
+	pr_debug("conntrack_mt: entering with ct=%p\n",ct);
+	/*printk("conntrack_mt: ctinfo=%x, status=%lx, statemask=%x, status_mask=%x, ct=%p\n",ctinfo, ct->status, state_mask, status_mask, ct);
+	 */
+	/* TODO */
+
 	if (ct) {
 		if (nf_ct_is_untracked(ct))
 			statebit = XT_CONNTRACK_STATE_UNTRACKED;

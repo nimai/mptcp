@@ -24,6 +24,7 @@
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/netfilter/nf_conntrack_tcp.h>
+#include <linux/netfilter/nf_conntrack_mptcp.h>
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_connlimit.h>
 #include <net/netfilter/nf_conntrack.h>

@@ -1,5 +1,6 @@
 #ifndef _NF_CONNTRACK_COMMON_H
 #define _NF_CONNTRACK_COMMON_H
+#undef CONFIG_NF_CONNTRACK_MPTCPA
 /* Connection state tracking for netfilter.  This is separated from,
    but required by, the NAT layer; it can also be used by an iptables
    extension. */
@@ -11,7 +12,7 @@ enum ip_conntrack_info {
 	   (in either direction). */
 	IP_CT_RELATED,
 
-#ifdef CONFIG_NF_CONNTRACK_MPTCP
+#ifdef CONFIG_NF_CONNTRACK_MPTCPA
 	/* Like RELATED, but the existing connection is a higher-level connection
 	 * such as Multipath TCP's, making of this connection a new verified subflow */
 	IP_MPCT_SUBFLOW,
@@ -26,8 +27,8 @@ enum ip_conntrack_info {
 
 	IP_CT_ESTABLISHED_REPLY = IP_CT_ESTABLISHED + IP_CT_IS_REPLY,
 	IP_CT_RELATED_REPLY = IP_CT_RELATED + IP_CT_IS_REPLY,
-#ifdef CONFIG_NF_CONNTRACK_MPTCP
-	IP_MPCT_SUBFLOW_REPLY = IP_MPCT_SUBFLOW_REPLY + IP_CT_IS_REPLY,
+#ifdef CONFIG_NF_CONNTRACK_MPTCPA
+	IP_MPCT_SUBFLOW_REPLY = IP_MPCT_SUBFLOW + IP_CT_IS_REPLY,
 #endif
 	IP_CT_NEW_REPLY = IP_CT_NEW + IP_CT_IS_REPLY,	
 	/* Number of distinct IP_CT types (no NEW in reply dirn). */
@@ -93,7 +94,7 @@ enum ip_conntrack_status {
 	IPS_UNTRACKED_BIT = 12,
 	IPS_UNTRACKED = (1 << IPS_UNTRACKED_BIT),
 
-#ifdef CONFIG_NF_CONNTRACK_MPTCP
+#ifdef CONFIG_NF_CONNTRACK_MPTCPA
 	/* Conntrack is verified as part of a MPTCP connection */
 	IPS_NEW_SUBFLOW_BIT = 12,
 	IPS_NEW_SUBFLOW = (1 << IPS_NEW_SUBFLOW_BIT),

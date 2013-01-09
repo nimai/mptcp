@@ -22,8 +22,8 @@ enum mptcp_ct_state {
 	MPTCP_CONNTRACK_LASTACK,
 	MPTCP_CONNTRACK_CLOSED,
 	MPTCP_CONNTRACK_SYN_SENT2,
-	MPTCP_CONNTRACK_FALLBACK,
 	MPTCP_CONNTRACK_MAX,
+	MPTCP_CONNTRACK_FALLBACK,
 	MPTCP_CONNTRACK_IGNORE
 };
 
@@ -74,20 +74,26 @@ static inline enum ip_conntrack_dir nf_mptcp_subdir2dir(struct mptcp_subflow_inf
 
 /* hashtable related */
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
-void nf_mptcp_hash_insert(struct mp_per_dir *mp, u32 token);
+bool nf_mptcp_hash_insert(struct mp_per_dir *mp, u32 token);
 void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
 
 
 /* general use functions for MPTCP */
-struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, unsigned int subtype);
 u32 nf_mptcp_get_token(const struct tcphdr *th);
 u32 __nf_mptcp_get_token(struct mp_join *mpj);
 
 struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th);
 
-u8 *nf_mptcp_next_opt(const struct tcphdr *th, u8 *hptr);
-struct mptcp_option *nf_mptcp_next_mpopt(const struct tcphdr *th, u8 *hptr);
-struct mptcp_option *nf_mptcp_first_mpopt(const struct tcphdr *th);
+struct mptcp_option *nf_mptcp_get_mpopt(const struct tcphdr *th, u8 *hptr, 
+		unsigned int *len, short *mptcptype);
+#define for_each_mpopt(opt, mptcpsubtype, len, tcph) \
+	for (opt=(u8*)((tcph)+1); \
+			(opt = (u8*)nf_mptcp_get_mpopt((tcph), (opt), &(len), &(mptcpsubtype))); \
+			opt+=(len))
+
+struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, 
+		unsigned int subtype);
+
 
 /* crypto functions */
 void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
@@ -135,33 +141,6 @@ void nf_ct_mptcp_destroy(struct nf_conn *ct);
 
 bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct);
 bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct);
-
-#if 0 
-struct mptcp_option *(*nf_mptcp_get_ptr_impl)(const struct tcphdr *th);
-
-struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th) 
-{
-	struct mptcp_option *ret = NULL;
-	if (try_module_get(nf_conntrack_mptcp_mod)) {
-		ret = (*nf_mptcp_get_ptr_impl)(th);
-		module_put(nf_conntrack_mptcp_mod);
-	}
-	else {
-		printk(KERN_DEBUG "NO IMPLEM -- not loaded");
-	}
-	return ret;
-}
-
-struct mptcp_option *nf_mptcp_get_ptr_impl0(const struct tcphdr *th) {
-		printk(KERN_DEBUG "NO IMPLEM -- dont know why :(");
-		return NULL;
-
-
-struct mptcp_option *(*nf_mptcp_get_ptr)(const struct tcphdr *th) = 
-	&nf_mptcp_get_ptr_impl0;
-#endif
-
-
 
 /* Debugging help function 
 char* format_stack_bytes(const __u8 *ptr, unsigned short n)

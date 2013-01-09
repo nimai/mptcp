@@ -248,6 +248,8 @@ static void death_by_event(unsigned long ul_conntrack)
 {
 	struct nf_conn *ct = (void *)ul_conntrack;
 	struct net *net = nf_ct_net(ct);
+	
+	pr_debug("death_by_event: ct=%p\n",ct);
 
 	if (nf_conntrack_event(IPCT_DESTROY, ct) < 0) {
 		/* bad luck, let's retry again */
@@ -285,6 +287,8 @@ static void death_by_timeout(unsigned long ul_conntrack)
 {
 	struct nf_conn *ct = (void *)ul_conntrack;
 	struct nf_conn_tstamp *tstamp;
+	
+	pr_debug("death_by_timeout: ct=%p\n",ct);
 
 	tstamp = nf_conn_tstamp_find(ct);
 	if (tstamp && tstamp->stop == 0)
@@ -448,7 +452,7 @@ __nf_conntrack_confirm(struct sk_buff *skb)
 	hash = hash_bucket(hash, net);
 	repl_hash = hash_conntrack(net, zone,
 				   &ct->tuplehash[IP_CT_DIR_REPLY].tuple);
-
+	
 	/* We're not in hash table, and we refuse to set up related
 	   connections for unconfirmed conns.  But packet copies and
 	   REJECT will give spurious warnings here. */
@@ -852,6 +856,7 @@ resolve_normal_ct(struct net *net, struct nf_conn *tmpl,
 		*ctinfo = IP_CT_ESTABLISHED_REPLY;
 		/* Please set reply bit if this packet OK */
 		*set_reply = 1;
+		pr_debug("nf_conntrack_in: seeing reply\n");
 	} else {
 		/* Once we've had two way comms, always ESTABLISHED. */
 		if (test_bit(IPS_SEEN_REPLY_BIT, &ct->status)) {
@@ -861,7 +866,7 @@ resolve_normal_ct(struct net *net, struct nf_conn *tmpl,
 			pr_debug("nf_conntrack_in: related packet for %p\n",
 				 ct);
 			*ctinfo = IP_CT_RELATED;
-#ifdef CONFIG_NF_CONNTRACK_MPTCP
+#ifdef CONFIG_NF_CONNTRACK_MPTCPA
 		} else if (test_bit(IPS_NEW_SUBFLOW_BIT, &ct->status)) {
 			pr_debug("nf_conntrack_in: new subflow packet for %p\n",
 				 ct);
@@ -964,9 +969,12 @@ nf_conntrack_in(struct net *net, u_int8_t pf, unsigned int hooknum,
 		goto out;
 	}
 
-	if (set_reply && !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status))
+	if (set_reply && !test_and_set_bit(IPS_SEEN_REPLY_BIT, &ct->status)) {
 		nf_conntrack_event_cache(IPCT_REPLY, ct);
+	}
+
 out:
+	pr_debug("nf_conntrack_in: returning %i, ctinfo=%x\n",ret,ctinfo);
 	if (tmpl) {
 		/* Special case: we have to repeat this hook, assign the
 		 * template again to this packet. We assume that this packet

@@ -851,11 +851,13 @@ int tcp_packet(struct nf_conn *ct,
 	struct mptcp_subflow_info *mpsub;
 	struct nf_conn_mptcp *mpct;
 	struct mp_join *mptr;
-	u32 hash;
 	u64 key1, key2;
+	u32 hash[5];
+
 
 	mpsub = &ct->proto.tcp.mpflow;
 	mpct = ct->proto.tcp.mpmaster;
+	/* mpct not NULL <=> this subflow is part of an MPTCP connection */
 	if (mpct)
 		/* mpct cannot be modified by several subflows at the same time */
 		spin_lock_bh(&mpct->lock);
@@ -869,6 +871,7 @@ int tcp_packet(struct nf_conn *ct,
 	index = get_conntrack_index(th);
 	new_state = tcp_conntracks[dir][index][old_state];
 	tuple = &ct->tuplehash[dir].tuple;
+	pr_debug("tcp_packet: new state=%s\n",(new_state<TCP_CONNTRACK_MAX)?tcp_conntrack_names[new_state]:"(pseudostate)");
 
 	switch (new_state) {
 	case TCP_CONNTRACK_SYN_SENT:
@@ -981,20 +984,31 @@ int tcp_packet(struct nf_conn *ct,
 	
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	case TCP_CONNTRACK_SYN_RECV:
+		pr_debug("tcp_packet: SYN_RECV - nf_ct_mptcp_verify_hash = %u\n",nf_ct_mptcp_verify_hash); 
 		if (nf_ct_mptcp_verify_hash && index == TCP_SYNACK_SET 
 				&& (mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
+			pr_debug("tcp_packet: JOIN SYNACK: verify hash, mptr=%p\n",mptr);
 			/* MPJOIN SYNACK received
-			 * Check the hash */
+			 * As nf_ct_mptcp_verify_hash is true, we have to check */
+			/* But first, retrieve the keys in the local structures.
+			 * nf_mptcp_subdir2dir is used to translate dir (related to
+			 * subflow) into the absolute direction of the MPTCP conntrack */
 			key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
 			key2 = mpct->d[!nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
-			mpsub->nonce[dir] = be32_to_cpu(mptr->u.synack.nonce);
-			BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
+			mpsub->nonce[dir] = mptr->u.synack.nonce;
+			pr_debug("tcp_packet: generate hmac to verify, mptr=%p\n",mptr);
+
 			/* effective hashing */
 			nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
-					(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
-			if (hash != be32_to_cpu(mptr->u.synack.mac)) {
-				pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
-							"local=%x, rem=%x\n",hash,be32_to_cpu(mptr->u.synack.mac));
+					(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], hash);
+			/* hash received is truncated */
+			if (memcmp(&(hash[3]), (u32*)&mptr->u.synack.mac, 2)) {
+				print_hex_dump_bytes("hmacComputed: ",DUMP_PREFIX_NONE, hash, 8);
+				print_hex_dump_bytes("hmacReceived: ",DUMP_PREFIX_NONE, &mptr->u.synack.mac, 8);
+				/* if the hash is incorrect, mark the packet as INVALID and
+				 * ignore its content */
+				pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack "
+							"local=%llx, rem=%llx\n",*((u64*)hash),mptr->u.synack.mac);
 				if (LOG_INVALID(net, IPPROTO_TCP))
 					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 							"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
@@ -1004,10 +1018,14 @@ int tcp_packet(struct nf_conn *ct,
 		}
 		break;
 	case TCP_CONNTRACK_ESTABLISHED:
+		pr_debug("tcp_packet: entering ESTABLISHED\n");
 		if (mpct) {
 			if (!ct->proto.tcp.mpflow.established) {
 				/* Emulation of PREESTABLISHED state:
-				 * only an ack can be received after an mp_join handshake */
+				 * state==ESTABLISHED && established==false 
+				 * <=> subflowstate==PREESTABLISHED
+				 * Only an ack can be received in this state.it can
+				 * also be a retransmission of the previous ACK+MP_JOIN */
 				if (index != TCP_ACK_SET) {
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
@@ -1015,22 +1033,27 @@ int tcp_packet(struct nf_conn *ct,
 					spin_unlock_bh(&mpct->lock);
 					return -NF_ACCEPT;
 				} else if (index == TCP_ACK_SET && !nf_mptcp_get_ptr(th)) {
+					/* If we see the final ACK without any MPTCP option, we can now 
+					 * pass in the subflow ESTABLISHED state. */
 					ct->proto.tcp.mpflow.established = true;
 				}
+				/* We could also check that a retransmission of the 
+				 * MPJOIN+ACK is the same then the previously seen one,
+				 * but it wouldn't serve any purpose */
 			} else if (nf_ct_mptcp_verify_hash &&
 					old_state == TCP_CONNTRACK_SYN_RECV &&
 					index == TCP_SYNACK_SET &&
 					(mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
-				/* check hash */
+				/* We have a MPJOIN+ACK, check the hash against the local data */
 				key1 = mpct->d[nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
 				key2 = mpct->d[!nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, dir)].key;
-				BUG_ON(mpsub->nonce[0] == mpsub->nonce[1]);
-				/* effective hashing */
 				nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
-						(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], &hash);
-				if (hash != be32_to_cpu(mptr->u.synack.mac)) {
+						(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], hash);
+				if (memcmp(hash, (u32*)&mptr->u.synack.mac, 5)) {
 					pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack"
-							"local=%x, rem=%x\n",hash,be32_to_cpu(mptr->u.synack.mac));
+							"local=%llx, rem=%llx\n",*((u64*)hash),(u64)mptr->u.synack.mac);
+					print_hex_dump_bytes("hmacComputed: ",DUMP_PREFIX_NONE, hash, 20);
+					print_hex_dump_bytes("hmacReceived: ",DUMP_PREFIX_NONE, &mptr->u.synack.mac, 20);
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
@@ -1039,6 +1062,7 @@ int tcp_packet(struct nf_conn *ct,
 				}
 
 			}
+			spin_unlock_bh(&mpct->lock);
 		}
 		break;
 #endif
@@ -1085,9 +1109,6 @@ int tcp_packet(struct nf_conn *ct,
 		/* Keep compilers happy. */
 		break;
 	}
-#ifdef CONFIG_NF_CONNTRACK_MPTCP
-	spin_unlock_bh(&mpct->lock);
-#endif
 
 	if (!tcp_in_window(ct, &ct->proto.tcp, dir, index,
 			   skb, dataoff, th, pf)) {
@@ -1194,8 +1215,10 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-		if (!(mptr = nf_mptcp_get_ptr(th)) || mptr->sub != MPTCP_SUB_JOIN)
+		if (!(mptr = nf_mptcp_get_ptr(th)) || mptr->sub != MPTCP_SUB_JOIN) {
+			pr_debug("conntrack: no mptcp join found in packet, ct=%p\n",ct);
 			goto nomptcp;
+		}
 		/* client is trying to establish a new subflow */
 
 		/* Is this a subflow of an existing MultipathTCP connection ? */
@@ -1211,9 +1234,9 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
 					mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW)) {
 			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
-			/* mark as RELATED */
-			/*__set_bit(IPS_EXPECTED_BIT, &ct->status);*/
-			__set_bit(IPS_NEW_SUBFLOW_BIT, &ct->status);
+			/* mark as RELATED/SUBFLOW */
+			__set_bit(IPS_EXPECTED_BIT, &ct->status);
+			/*__set_bit(IPS_NEW_SUBFLOW_BIT, &ct->status);*/
 			/* link to parent mptcp state */
 			ct->proto.tcp.mpmaster = mpct;
 			/* Fill the subflow specific structure - already alloc by ct */
@@ -1221,8 +1244,8 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
 			/* the direction is the same as mpct if rcvd token is the one from
 			 * original direction of mpct */
-			mpsub->rel_dir = (mpct->d[IP_CT_DIR_ORIGINAL].token == token) | 
-				IP_CT_DIR_ORIGINAL;
+			mpsub->rel_dir = (mpct->d[IP_CT_DIR_ORIGINAL].token == token)
+				?IP_CT_DIR_ORIGINAL:IP_CT_DIR_REPLY;
 			mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
 				((struct mp_join*)mptr)->u.syn.nonce;
 			/* for preestablished state */
@@ -1243,7 +1266,6 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			return false;
 		}
 		spin_unlock_bh(&mpct->lock);
-nomptcp:
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 	} else if (nf_ct_tcp_loose == 0) {
 		/* Don't try to pick up connections. */
@@ -1271,6 +1293,8 @@ nomptcp:
 		ct->proto.tcp.seen[1].flags = IP_CT_TCP_FLAG_SACK_PERM |
 					      IP_CT_TCP_FLAG_BE_LIBERAL;
 	}
+
+nomptcp:
 
 	/* tcp_packet will set them */
 	ct->proto.tcp.last_index = TCP_NONE_SET;
