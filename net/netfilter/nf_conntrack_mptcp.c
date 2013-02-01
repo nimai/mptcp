@@ -240,9 +240,9 @@ static const char *const mptcp_conntrack_names[] = {
 	"M_ESTABLISHED",
 	"M_NO_SUBFLOW",
 	"M_FINWAIT",
-	"M_TIMEWAIT",
 	"M_CLOSEWAIT",
 	"M_LASTACK",
+	"M_TIMEWAIT",
 	"M_CLOSED",
 	"M_SYN_SENT2",
 };
@@ -254,9 +254,9 @@ static const char *const mptcp_conntrack_names[] = {
 #define sMES MPTCP_CONNTRACK_ESTABLISHED
 #define sMNS MPTCP_CONNTRACK_NO_SUBFLOW
 #define sMFW MPTCP_CONNTRACK_FINWAIT
-#define sMTW MPTCP_CONNTRACK_TIMEWAIT
 #define sMCW MPTCP_CONNTRACK_CLOSEWAIT
 #define sMLA MPTCP_CONNTRACK_LASTACK
+#define sMTW MPTCP_CONNTRACK_TIMEWAIT
 #define sMCL MPTCP_CONNTRACK_CLOSED
 #define sMIV MPTCP_CONNTRACK_MAX
 #define sMFB MPTCP_CONNTRACK_FALLBACK
@@ -291,7 +291,7 @@ enum mptcp_pkt_type {
 #define HOURS * 60 MINS
 #define DAYS * 24 HOURS
 unsigned int mptcp_timeouts[MPTCP_CONNTRACK_MAX] __read_mostly = {
-	[MPTCP_CONNTRACK_NO_SUBFLOW]	= 10 MINS,
+	[MPTCP_CONNTRACK_NO_SUBFLOW]	= 1 MINS,
 	[MPTCP_CONNTRACK_TIMEWAIT]		= 2 MINS,
 	[MPTCP_CONNTRACK_CLOSED]		= 10 SECS,
 };
@@ -754,11 +754,14 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	
 
 	switch (new_state) {
+	case MPTCP_CONNTRACK_CLOSED:
+		pr_debug("nf_ct_mptcp_packet: connection is going to be closed.\n");
+		break;
 	case MPTCP_CONNTRACK_FALLBACK:
 			/* the connection is going to fall back, we can destroy
 			 * the conntrack at the MPTCP level */
 			nf_mptcp_fallback(ct, mpct);
-			goto updateState;
+			goto updateTimer;
 	
 	case MPTCP_CONNTRACK_SYN_RECV:
 			/*if (index != MPTCP_CAP_SYN)
@@ -828,6 +831,7 @@ updateState:
 	/* Fire the transition */
 	pr_debug("mptcp_packet: effective state update: %s\n", mptcp_conntrack_names[new_state]);
 	mpct->state = new_state;
+updateTimer:
 	/* Activate the timer for destruction if the new state requires it */
 	if (new_state == MPTCP_CONNTRACK_CLOSED || new_state == MPTCP_CONNTRACK_TIMEWAIT) {
 		pr_debug("mptcp_packet: activating timer for destruction!\n");
@@ -990,6 +994,7 @@ bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct) {
 	mpct->counter_sub += 1;
 	BUG_ON(mpct->counter_sub <= 0);
 	if (mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW) {
+		pr_debug("ct_mptcp: NO_SUBFLOW -> ESTABLISHED\n");
 		mpct->state = MPTCP_CONNTRACK_ESTABLISHED;
 		nf_mptcp_update_timer(mpct);
 		return true;
@@ -1004,6 +1009,7 @@ bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct) {
 	mpct->counter_sub -= 1;
 	BUG_ON(mpct->counter_sub < 0);
 	if (mpct->state == MPTCP_CONNTRACK_ESTABLISHED && mpct->counter_sub == 0) {
+		pr_debug("ct_mptcp: ESTABLISHED -> NO_SUBFLOW\n");
 		mpct->state = MPTCP_CONNTRACK_NO_SUBFLOW;
 		nf_mptcp_update_timer(mpct);
 		return true;

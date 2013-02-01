@@ -53,7 +53,7 @@ static int nf_ct_tcp_max_retrans __read_mostly = 3;
  * If the hmac received does not match the local computation, the packet is 
  * marked as INVALID.
  */
-static int nf_ct_mptcp_verify_hash __read_mostly = 1;
+static int nf_ct_mptcp_verify_hash __read_mostly = 0;
 #endif
 
   /* FIXME: Examine ipfilter's timeouts and conntrack transitions more
@@ -1002,7 +1002,7 @@ int tcp_packet(struct nf_conn *ct,
 			nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
 					(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], hash);
 			/* hash received is truncated */
-			if (memcmp(&(hash[3]), (u32*)&mptr->u.synack.mac, 2)) {
+			if (memcmp(hash, (u32*)&mptr->u.synack.mac, 2)) {
 				print_hex_dump_bytes("hmacComputed: ",DUMP_PREFIX_NONE, hash, 8);
 				print_hex_dump_bytes("hmacReceived: ",DUMP_PREFIX_NONE, &mptr->u.synack.mac, 8);
 				/* if the hash is incorrect, mark the packet as INVALID and
@@ -1018,7 +1018,6 @@ int tcp_packet(struct nf_conn *ct,
 		}
 		break;
 	case TCP_CONNTRACK_ESTABLISHED:
-		pr_debug("tcp_packet: entering ESTABLISHED\n");
 		if (mpct) {
 			if (!ct->proto.tcp.mpflow.established) {
 				/* Emulation of PREESTABLISHED state:
@@ -1027,6 +1026,7 @@ int tcp_packet(struct nf_conn *ct,
 				 * Only an ack can be received in this state.it can
 				 * also be a retransmission of the previous ACK+MP_JOIN */
 				if (index != TCP_ACK_SET) {
+					pr_debug("tcp_packet: invalid pkt in PREESTABLISHED state\n");
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid pkt in PREESTABLISHED state ");
@@ -1036,6 +1036,7 @@ int tcp_packet(struct nf_conn *ct,
 					/* If we see the final ACK without any MPTCP option, we can now 
 					 * pass in the subflow ESTABLISHED state. */
 					ct->proto.tcp.mpflow.established = true;
+					pr_debug("tcp_packet: PREESTABLISHED -> ESTALBISHED state\n");
 				}
 				/* We could also check that a retransmission of the 
 				 * MPJOIN+ACK is the same then the previously seen one,

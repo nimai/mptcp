@@ -198,6 +198,7 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 		/* limit the subflows per MPTCP connection */
 		if (tuple_ptr->dst.protonum == IPPROTO_TCP &&
 				ct->proto.tcp.mpmaster) {
+			pr_debug("connlimit: counting for mpct=%p\n",ct->proto.tcp.mpmaster);
 			connections = ct->proto.tcp.mpmaster->counter_sub;
 			/* no need to count connections */
 			goto counted;
@@ -224,6 +225,7 @@ connlimit_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	spin_unlock_bh(&info->data->lock);
 
  counted:
+	pr_debug("connlimit: connections counted=%i, limit=%i\n",connections,info->limit);
 	if (connections < 0)
 		/* kmalloc failed, drop it entirely */
 		goto hotdrop;
