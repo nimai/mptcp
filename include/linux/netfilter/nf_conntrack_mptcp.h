@@ -60,6 +60,7 @@ struct nf_conn;
 static inline struct nf_conn_mptcp *
 nf_ct_perdir_to_conntrack(const struct mp_per_dir *mp)
 {
+	pr_debug("mpdir=%p, mpdir->dir=%i\n", mp, mp->dir);
 	return container_of(mp, struct nf_conn_mptcp,
 			    d[mp->dir]);
 }

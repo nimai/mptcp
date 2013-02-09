@@ -36,15 +36,27 @@ static inline u32 nf_mptcp_hash_tk(u32 token)
 	return token % NF_MPTCP_HASH_SIZE;
 }
 
-/* Return the MPTCP conntrack from a token. 
- * This does so by looking up the hashtable */
+/* Return the MPTCP conntrack from a token.
+ * This does so by looking up the hashtable
+ *
+ *FIXME Also depends on the direction: it avoids some easy token collisions.
+ * /!\ here, dir defines the host, not the dir of the packet.
+ * That is, IP_CT_DIR_ORIGINAL designate the connection's initiator, not the
+ * fact that the packet handled is transiting in the original dir.
+ */
 struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token) 
 {
 	u32 hash = nf_mptcp_hash_tk(token);
 	struct mp_per_dir *mp;
+	struct nf_conn_mptcp *mpct;
 
 	read_lock(&htb_lock);
 	list_for_each_entry(mp, &mptcp_conn_htb[hash], collide_tk) {
+        mpct = nf_ct_perdir_to_conntrack(mp);
+		pr_debug("mpct=%p: state=%i, token0=%x (key0=%llx), "
+				"token1=%x (key1=%llx)\n", mpct,
+				mpct->state, mpct->d[0].token, 
+				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 		if (token == mp->token) {
 	        read_unlock(&htb_lock);
             return nf_ct_perdir_to_conntrack(mp);
@@ -100,7 +112,7 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 		 * before the freeing, else, we wouldn't have any reference left to
 		 * remove it later */
 		list_del(&mp->collide_tk);
-		list_del(&mpct->d[!&mp->dir].collide_tk);
+		list_del(&mpct->d[!mp->dir].collide_tk);
 		kfree(mpct);
 	}
 }
@@ -246,6 +258,15 @@ static const char *const mptcp_conntrack_names[] = {
 	"M_CLOSED",
 	"M_SYN_SENT2",
 };
+static const char *const mptcp_index_names[] = {
+	"MPTCP_CAP_SYN",
+	"MPTCP_CAP_SYNACK",
+	"MPTCP_CAP_ACK",
+	"MPTCP_DATA_FIN",
+	"MPTCP_DATA_ACK",
+	"MPTCP_FASTCLOSE",
+	"MPTCP_NOOPT",
+};
 
 #define sMNO MPTCP_CONNTRACK_NONE
 #define sMSS MPTCP_CONNTRACK_SYN_SENT
@@ -322,7 +343,7 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			return MPTCP_INVALID;
 		case MPTCP_SUB_CAPABLE:
 			pr_debug("nf_mptcp CAP: SYN=%u, ACK=%u, senderkey=%llx, otherkey=%llx\n",tcph->syn, tcph->ack, 
-					((struct mp_capable*)*mp)->sender_key, (tcph->syn & tcph->ack)?((struct mp_capable*)*mp)->receiver_key:0);
+					((struct mp_capable*)*mp)->sender_key, (~tcph->syn & tcph->ack)?((struct mp_capable*)*mp)->receiver_key:0);
 			if (tcph->syn) return (tcph->ack ? MPTCP_CAP_SYNACK : MPTCP_CAP_SYN);
 			else if (tcph->ack) return MPTCP_CAP_ACK;
 			return MPTCP_INVALID;
@@ -592,7 +613,9 @@ void nf_mptcp_fallback(struct nf_conn *ct, struct nf_conn_mptcp *mpct) {
 	 * 2) an infinite mapping is present in both directions 
 	 *
 	 */
+	pr_debug("=======================================================\n");
 	pr_debug("nf_ct_mptcp: falling back to single-path TCP tracking.\n");
+	pr_debug("=======================================================\n");
 	/* The subflow may outlive the data connection, ref to connection 
 	 * must be deleted. */
 	spin_lock_bh(&ct->lock);
@@ -671,6 +694,8 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 	ct->proto.tcp.mpmaster = mpct;
 	d = &mpct->d[IP_CT_DIR_ORIGINAL];
 	d->dir = IP_CT_DIR_ORIGINAL;
+	d2 = &mpct->d[IP_CT_DIR_REPLY];
+	d2->dir = IP_CT_DIR_REPLY;
 	switch (new_state){
 	case MPTCP_CONNTRACK_SYN_SENT:
 		if (index == MPTCP_CAP_SYN) {
@@ -697,7 +722,6 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 			/* set keys */
 			d->key = ((struct mp_capable*)mptr)->sender_key;
 			/* for other direction too */
-			d2 = &mpct->d[IP_CT_DIR_REPLY];
 			d2->key = ((struct mp_capable*)mptr)->receiver_key;
 			/* and fill the struct with them */
 			nf_mptcp_key_sha1(d->key, &d->token, &d->last_dseq);
@@ -714,7 +738,7 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 		return false;
 
 	}
-	mpct->state = MPTCP_CONNTRACK_NONE;
+	mpct->state = MPTCP_CONNTRACK_NONE; /* initial state */
 	/* the transition to new state will be effectively fired later by mptcp_packet stage */ 
 	return true;
 }
@@ -737,6 +761,11 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	pr_debug("mptcp_packet: ENTERING MPTCP PACKET\n");
 	
 	mpct = ct->proto.tcp.mpmaster;
+	if (mpct)
+		pr_debug("mpct=%p for ct=%p: state=%i, token0=%x (key0=%llx), "
+				"token1=%x (key1=%llx)\n", mpct,
+				ct, mpct->state, mpct->d[0].token, 
+				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 	old_state = mpct->state;
 	subdir = CTINFO2DIR(ctinfo);
 	dir = nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, subdir);
@@ -856,6 +885,8 @@ int nf_ct_mptcp_error(struct net *net, struct nf_conn *tmpl,
 	int ret;
 	const struct tcphdr *th;
 	struct tcphdr _tcph;
+	
+	pr_debug("=================== Packet ==================\n");
 
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
@@ -890,12 +921,13 @@ bool nf_ct_mptcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
     
-	pr_debug("mptcp_new: tcp_new returned\n");
-	if (!(mptr = nf_mptcp_get_ptr(th)))
+	if (!(mptr = nf_mptcp_get_ptr(th))) {
+		pr_debug("mptcp_new: no mptcp option\n");
 		return ret; /* no mptcp option present */
+	}
 
 	index = _get_conntrack_index(th, &mptr);
-	pr_debug("mptcp_new: dispatching with index:%u\n", index);
+	pr_debug("mptcp_new: transition index: %s\n", mptcp_index_names[index]);
 	/* Get mptcp packet type and return a pointer mptr to the right option in
 	 * skb */
 	switch (index) {
@@ -927,6 +959,8 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 	enum mptcp_pkt_type index;
 	
 	mpct = ct->proto.tcp.mpmaster;
+	
+	pr_debug("=== [Client %s Server]\n",CTINFO2DIR(ctinfo)?"<--":"-->");
 
 	/* first handle as single path packet */
 	ret = tcp_packet(ct, skb, dataoff, ctinfo, pf, hooknum);
@@ -957,7 +991,7 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 	/* Get mptcp packet type and return a pointer mptr to the right option in
 	 * skb */
 	index = _get_conntrack_index(th, &mptr);
-	pr_debug("mptcp_packet: transition index: %u\n",index);
+	pr_debug("mptcp_packet: transition index: %s\n", mptcp_index_names[index]);
 	switch (index) {
 	/* mptcp packet: only transitions from MPTCP's FSM */
 	case MPTCP_NOOPT:

@@ -861,6 +861,7 @@ int tcp_packet(struct nf_conn *ct,
 	if (mpct)
 		/* mpct cannot be modified by several subflows at the same time */
 		spin_lock_bh(&mpct->lock);
+	pr_debug("tcp_packet: is a mptcp subflow? %s\n", mpct?"YES":"NO");
 #endif
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
@@ -1019,12 +1020,15 @@ int tcp_packet(struct nf_conn *ct,
 		break;
 	case TCP_CONNTRACK_ESTABLISHED:
 		if (mpct) {
-			if (!ct->proto.tcp.mpflow.established) {
+			/*pr_debug("mpct=%p established, ct=%p is established: %s\n",mpct, ct, 
+			 * ct->proto.tcp.mpflow.established?"yes":"no");*/
+			if (!ct->proto.tcp.mpflow.established && !nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN)) {
 				/* Emulation of PREESTABLISHED state:
-				 * state==ESTABLISHED && established==false 
-				 * <=> subflowstate==PREESTABLISHED
+				 * mptcp_state==ESTABLISHED && subflow_established==false
+				 * <=> subflow_state==PREESTABLISHED
 				 * Only an ack can be received in this state.it can
-				 * also be a retransmission of the previous ACK+MP_JOIN */
+				 * also be a retransmission of the previous ACK+MP_JOIN =>
+				 * avoid those to set the subflow state to established*/
 				if (index != TCP_ACK_SET) {
 					pr_debug("tcp_packet: invalid pkt in PREESTABLISHED state\n");
 					if (LOG_INVALID(net, IPPROTO_TCP))
@@ -1032,12 +1036,11 @@ int tcp_packet(struct nf_conn *ct,
 								"nf_ct_mptcp: invalid pkt in PREESTABLISHED state ");
 					spin_unlock_bh(&mpct->lock);
 					return -NF_ACCEPT;
-				} else if (index == TCP_ACK_SET && !nf_mptcp_get_ptr(th)) {
-					/* If we see the final ACK without any MPTCP option, we can now 
-					 * pass in the subflow ESTABLISHED state. */
-					ct->proto.tcp.mpflow.established = true;
-					pr_debug("tcp_packet: PREESTABLISHED -> ESTALBISHED state\n");
 				}
+				/* If we see the final ACK without any MPTCP option, we can now 
+				 * pass in the subflow ESTABLISHED state. */
+				ct->proto.tcp.mpflow.established = true;
+				pr_debug("tcp_packet: PREESTABLISHED -> ESTALBISHED state\n");
 				/* We could also check that a retransmission of the 
 				 * MPJOIN+ACK is the same then the previously seen one,
 				 * but it wouldn't serve any purpose */
@@ -1228,8 +1231,15 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 * for the original direction, it is highly probable that the
 		 * sender is an end-host of that mptcp connection. */
 		token = __nf_mptcp_get_token((struct mp_join*)mptr);
-		mpct = nf_mptcp_hash_find(token);
+		/* find the mpct from receiver's token */
+		/* TODO : collision handling: keep all matching tokens
+		 * then: dir check, hmac check... */
+		mpct = nf_mptcp_hash_find(token); 
 		spin_lock_bh(&mpct->lock);
+		if (mpct)
+			pr_debug("mpct=%p found for ct=%p: state=%i, token0=%x (key0=%llx), "
+				"token1=%x (key1=%llx)\n", mpct, ct, mpct->state, mpct->d[0].token, 
+				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 		/* the mptcp connection needs to be established before accepting any
 		 * new subflow */
 		if (mpct && (mpct->state == MPTCP_CONNTRACK_ESTABLISHED ||
@@ -1258,7 +1268,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			nf_mptcp_add_subflow(mpct);
 		} else if (mpct) {
 			pr_debug("conntrack: mp_join's token expected but MPTCP "
-					"connection not established, ct=%p\n",ct);
+					"connection not established, mpct state=%i, ct=%p\n", mpct->state, ct);
 		}
 		else {
 			pr_debug("conntrack: unexpected token in mp_join segment,"

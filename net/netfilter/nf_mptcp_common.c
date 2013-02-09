@@ -8,64 +8,23 @@
 
 /* Look for the presence of MPTCP in the set of TCP options from a given
  * TCP packet pointed by th.
- * Inspired by tcp_parse_options() from tcp-input.c
  * Return a pointer to the option in the skb
  * or NULL if it can't be found.
  */
 
-struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th)
-{
-    __u8 *ptr;
-	int length = (th->doff * 4) - sizeof(struct tcphdr);
-    
-    /*
-    char *dbgstr;
-    printk(KERN_DEBUG "tcp header:\n"
-            "source: %u dest: %u\n"
-            "offset: %u window: %u\n\n", th->source, th->dest,
-            th->doff, th->window);
-    dbgstr = format_stack_bytes((unsigned char*)th, 80))    
-    printk(KERN_DEBUG "%s", dbgstr);
-    kfree(dbgstr);
-    */
-
-    ptr = (__u8*)(th + 1); /* skip the common tcp header */
-    printk(KERN_DEBUG "find_mptcp_option: length=%i, opcode=%i\n", length, *ptr);
-
-	while (length > 0) {
-		int opcode = *ptr++;
-		int opsize;
-
-        switch (opcode) {
-        case TCPOPT_EOL:
-            return NULL;
-        case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
-            length--;
-            continue;
-        default:
-			opsize = *ptr++;
-            printk(KERN_DEBUG "find_mptcp_option: opsize = %i\n", opsize);
-			if (opsize < 2) /* "silly options" */
-				return NULL;
-			if (opsize > length)
-				return NULL;	/* don't parse partial options */
-			if (opcode == TCPOPT_MPTCP) {
-				printk(KERN_DEBUG "find_mptcp_option: FOUND, kind=%u, size=%u\n", 
-						((struct mptcp_option*)(ptr-2))->sub,opsize);
-                return (struct mptcp_option*)(ptr-2);
-			}
-            ptr += opsize-2;
-		    length -= opsize;
-        }
-    }
-    /* no mptcp option has been found after the whole parsing */
-    return NULL;
+struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th) {
+	unsigned int len;
+	short mptcptype;
+	return nf_mptcp_get_mpopt(th, (u8*)(th+1), &len, &mptcptype);
 }
 EXPORT_SYMBOL(nf_mptcp_get_ptr);
 
 /* Get a pointer to the first met MPTCP option in the TCP header.
  * hptr is a pointer to a valid TCP option
- * Return NULL if no more option in the header */
+ * Return NULL if no more option in the header 
+ *
+ * Inspired by tcp_parse_options() from tcp-input.c
+ */
 struct mptcp_option *nf_mptcp_get_mpopt(const struct tcphdr *th, u8 *hptr, 
 		unsigned int *len, short *mptcptype)
 {
