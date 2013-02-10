@@ -247,6 +247,8 @@ HOSTCC       = gcc
 HOSTCXX      = g++
 HOSTCFLAGS   = -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer
 HOSTCXXFLAGS = -O2
+#HOSTCFLAGS   = -Wall -Wmissing-prototypes -Wstrict-prototypes -ggdb
+#HOSTCXXFLAGS = -ggdb
 
 # Decide whether to build built-in, modular, or both.
 # Normally, just do built-in.
@@ -593,7 +595,7 @@ endif
 endif
 
 ifdef CONFIG_DEBUG_INFO
-KBUILD_CFLAGS	+= -g
+KBUILD_CFLAGS	+= -ggdb
 KBUILD_AFLAGS	+= -gdwarf-2
 endif
 
