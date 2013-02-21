@@ -20,7 +20,6 @@ enum mptcp_ct_state {
 	MPTCP_CONNTRACK_CLOSEWAIT,
 	MPTCP_CONNTRACK_LASTACK,
 	MPTCP_CONNTRACK_TIMEWAIT,
-	MPTCP_CONNTRACK_CLOSED,
 	MPTCP_CONNTRACK_SYN_SENT2,
 	MPTCP_CONNTRACK_MAX,
 	MPTCP_CONNTRACK_FALLBACK,
@@ -138,10 +137,20 @@ int tcp_packet(struct nf_conn *ct,
 		      u_int8_t pf,
 		      unsigned int hooknum);
 
+void nf_mptcp_fallback(struct nf_conn *ct, struct nf_conn_mptcp *mpct);
+void nf_mptcp_put(struct nf_conn_mptcp* mpct);
+
 void nf_ct_mptcp_destroy(struct nf_conn *ct);
 
 bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct);
 bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct);
+
+void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter);
+
+/* Time to wait before a MPTCP connection without subflow opened should be
+ * considered closed */
+/*unsigned int nf_ct_mptcp_timeout_no_subflow;*/ /* __read_mostly; */
+
 
 /* Debugging help function 
 char* format_stack_bytes(const __u8 *ptr, unsigned short n)

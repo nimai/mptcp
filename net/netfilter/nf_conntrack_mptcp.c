@@ -242,6 +242,8 @@ void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
 		hash_out[i] = cpu_to_be32(hash_out[i]);
 }
 
+/* -- end of utility functions */
+static unsigned int nf_ct_mptcp_timeout_no_subflow  __read_mostly = 10 * 60 * HZ;
 
 /* STATES from the FSM */
 /* Define states' names */ 
@@ -255,7 +257,6 @@ static const char *const mptcp_conntrack_names[] = {
 	"M_CLOSEWAIT",
 	"M_LASTACK",
 	"M_TIMEWAIT",
-	"M_CLOSED",
 	"M_SYN_SENT2",
 };
 static const char *const mptcp_index_names[] = {
@@ -265,6 +266,7 @@ static const char *const mptcp_index_names[] = {
 	"MPTCP_DATA_FIN",
 	"MPTCP_DATA_ACK",
 	"MPTCP_FASTCLOSE",
+	"MPTCP_INFINITE_MAPPING",
 	"MPTCP_NOOPT",
 };
 
@@ -278,10 +280,9 @@ static const char *const mptcp_index_names[] = {
 #define sMCW MPTCP_CONNTRACK_CLOSEWAIT
 #define sMLA MPTCP_CONNTRACK_LASTACK
 #define sMTW MPTCP_CONNTRACK_TIMEWAIT
-#define sMCL MPTCP_CONNTRACK_CLOSED
 #define sMIV MPTCP_CONNTRACK_MAX
-#define sMFB MPTCP_CONNTRACK_FALLBACK
 #define sMIG MPTCP_CONNTRACK_IGNORE
+#define sMFB MPTCP_CONNTRACK_FALLBACK
 
 /* Possible packet types related to MPTCP connection */
 enum mptcp_pkt_type {
@@ -291,6 +292,7 @@ enum mptcp_pkt_type {
 	MPTCP_DATA_FIN,
 	MPTCP_DATA_ACK,
 	MPTCP_FASTCLOSE,
+	MPTCP_INFINITE_MAP,
 	MPTCP_NOOPT,
 	MPTCP_PKT_INDEX_MAX,
 	MPTCP_DATA_MAP, /* not part of the FSM */
@@ -301,22 +303,6 @@ enum mptcp_pkt_type {
 	MPTCP_INVALID
 };
 	
-
-/* There are only 3 states of MPTCP's conntrack that can elicit a timeout:
- * MPTCP_CONNTRACK_NO_SUBFLOW and MPTCP_CONNTRACK_CLOSED,
- * MPTCP_CONNTRACK_TIMEWAIT.
- * In all the other cases, there is at least one single-path TCP conntrack that will expires 
- *	and bring back the MPTCP's state to MPTCP_CONNTRACK_NO_SUBFLOW */
-#define SECS * HZ
-#define MINS * 60 SECS
-#define HOURS * 60 MINS
-#define DAYS * 24 HOURS
-unsigned int mptcp_timeouts[MPTCP_CONNTRACK_MAX] __read_mostly = {
-	[MPTCP_CONNTRACK_NO_SUBFLOW]	= 1 MINS,
-	[MPTCP_CONNTRACK_TIMEWAIT]		= 2 MINS,
-	[MPTCP_CONNTRACK_CLOSED]		= 10 SECS,
-};
-
 
 /* Return the index of the packet-type corresponding to the packet seen
  * This refers to a value from enum mptcp_pkt_type 
@@ -348,7 +334,7 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			else if (tcph->ack) return MPTCP_CAP_ACK;
 			return MPTCP_INVALID;
 		case MPTCP_SUB_FAIL:
-			if (tcph->rst) return MPTCP_FAIL;
+			if (tcph->rst || tcph->ack) return MPTCP_FAIL;
 			return MPTCP_INVALID;
 		case MPTCP_SUB_FCLOSE:
 			if (tcph->rst) return MPTCP_FASTCLOSE;
@@ -360,7 +346,12 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 					mpdss->M, mpdss->m?64:32);
 			if (mpdss->F) return MPTCP_DATA_FIN;
 			else if (mpdss->A) return MPTCP_DATA_ACK;
-			else if (mpdss->M) return MPTCP_DATA_MAP;
+			else if (mpdss->M) {
+				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0)
+					return MPTCP_INFINITE_MAP;
+				else
+					return MPTCP_DATA_MAP;
+			}
 			return MPTCP_INVALID;
 		default:
 			break;
@@ -405,8 +396,8 @@ static enum mptcp_pkt_type mptcp_check_combination(const struct tcphdr *tcph)
 static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = {
 	{
 /* ORIGINAL */
-/*					sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpcap syn*/	   { sMSS, sMSS, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMSS, sMSS, sMS2},
+/*					sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpcap syn*/	   { sMSS, sMSS, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMSS, sMS2},
 /*
  *	sMNO -> sMSS	Initialize a new connection
  *	sMSS -> sMSS	Retransmitted SYN
@@ -418,10 +409,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIG
  *	sMLA -> sMIG
  *	sMTW -> sMSS	Reopened connection (RFC 1122).
- *	sMCL -> sMSS
  */
-/*				 sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpcap synack*/{ sMIV, sMIV, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMIG, sMIG, sMSR},
+/*				 sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpcap synack*/{ sMIV, sMIV, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMIG, sMSR},
 /*
  *	sMNO -> sMIV	Too late and no reason to do anything
  *	sMSS -> sMIV	Client can't send SYN and then SYN/ACK
@@ -434,10 +424,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIG
  *	sMLA -> sMIG
  *	sMTW -> sMIG
- *	sMCL -> sMIG
  */
-/*	    	     sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpcap ack*/ { sMIV, sMIV, sMES, sMIG, sMIG, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV},
+/*	    	     sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpcap ack*/ { sMIV, sMIV, sMES, sMIG, sMIG, sMIV, sMIV, sMIV, sMIV, sMIV},
 /*
  *	sMNO -> sMIV	Too late and no reason to do anything
  *	sMSS -> sMIV	Client should have received mpcap synack first.
@@ -449,10 +438,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIV
  *	sMLA -> sMIV
  *	sMTW -> sMIV
- *	sMCL -> sMIV
  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*datafin*/    { sMIV, sMIV, sMFW, sMFW, sMIG, sMLA, sMLA, sMLA, sMTW, sMCL, sMIV},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*datafin*/    { sMIV, sMIV, sMFW, sMFW, sMIG, sMLA, sMLA, sMLA, sMTW, sMIV},
 /*
  *	sMNO -> sMIV	Too late and no reason to do anything...
  *	sMSS -> sMIV	Client migth not send FIN in this state:
@@ -467,10 +455,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMLA
  *	sMLA -> sMLA	Retransmitted FIN. Remain in the same state.
  *	sMTW -> sMTW
- *	sMCL -> sMCL
  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*dataack*/	   { sMES, sMIV, sMIV, sMES, sMIG, sMCW, sMCW, sMTW, sMTW, sMCL, sMIV},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*dataack*/	   { sMES, sMIV, sMIV, sMES, sMIG, sMCW, sMCW, sMTW, sMTW, sMIV},
 /*
  *	sMNO -> sMES	Assumed.
  *	sMSS -> sMIV	ACK is invalid: we haven't seen a SYN/ACK yet.
@@ -482,16 +469,31 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMCW
  *	sMLA -> sMTW	Last ACK detected.
  *	sMTW -> sMTW	Retransmitted last ACK. Remain in the same state.
- *	sMCL -> sMCL
  */
 /*
  *  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*fclose*/    { sMIV, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*fclose*/    { sMIV, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW},
 /*
- * a valid fclose always leads to closed state.
+ * a valid fclose always leads to a TIMEWAIT state: the connection is kept
+ * alive until there's no more open subflow.
  */
-/*mpnoopt */	 { sMFB, sMFB, sMFB, sMES, sMIG, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2}
+/*				  sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/* inf mapping */{ sMFB, sMIV, sMIV, sMFB, sMFB, sMFB, sMFB, sMFB, sMFB, sMIV},
+/*
+ *	sMNO -> sMFB	Assumed established but it falls back
+ *	sMSS -> sMIV	Can't be any DSS while synchronizing
+ *	sMSR -> sMIV
+ *	sMS2 -> sMIV
+ *	sMES -> sMFB	Common case of fallback with a single subflow
+ *	sMNS -> sMIG	Unexpected packet while no subflow should be active
+ *	sMFW -> sMFB	Fallback possible until connection closed
+ *	sMCW -> sMFB
+ *	sMLA -> sMFB	
+ *	sMTW -> sMTW
+ */
+/*				  sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpnoopt */	 { sMNO, sMFB, sMFB, sMES, sMIG, sMFW, sMCW, sMLA, sMTW, sMFB}
 /* packet without MPTCP option cannot affect the MPTCP conntrack, except for
  * falling back:
  *  sMSS -> sMFB
@@ -501,8 +503,8 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 	},
 	{
 /* REPLY */
-/*				sMNO, sMSS, sMSR, sMES, sMNF, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2*/
-/*mpcapsyn*/	{ sMIV, sMS2, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMS2},
+/*				sMNO, sMSS, sMSR, sMES, sMNF, sMFW, sMCW, sMLA, sMTW, sMS2*/
+/*mpcapsyn*/	{ sMIV, sMS2, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMS2},
 /*
  *	sMNO -> sMIV	Never reached.
  *	sMSS -> sMS2	Simultaneous open
@@ -514,10 +516,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIV
  *	sMLA -> sMIV
  *	sMTW -> sMIV	Reopened connection, but server may not do it.
- *	sMCL -> sMIV
  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpcapsynack*/ { sMIV, sMSR, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMIG, sMIG, sMSR},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpcapsynack*/ { sMIV, sMSR, sMIG, sMIG, sMIV, sMIG, sMIG, sMIG, sMIG, sMSR},
 /*
  *	sMSS -> sMSR	Standard open.
  *	sMS2 -> sMSR	Simultaneous open
@@ -528,10 +529,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIG
  *	sMLA -> sMIG
  *	sMTW -> sMIG
- *	sMCL -> sMIG
  */
-/*	    	     sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpcap ack*/ { sMIV, sMIV, sMES, sMIG, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV},
+/*	    	     sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpcap ack*/ { sMIV, sMIV, sMES, sMIG, sMIV, sMIV, sMIV, sMIV, sMIV, sMIV},
 /*
  *	sMNO -> sMIV	
  *	sMSS -> sMIV	
@@ -543,10 +543,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMIV
  *	sMLA -> sMIV
  *	sMTW -> sMIV
- *	sMCL -> sMIV
  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*datafin*/    { sMIV, sMIV, sMFW, sMFW, sMIV, sMLA, sMLA, sMLA, sMTW, sMCL, sMIV},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*datafin*/    { sMIV, sMIV, sMFW, sMFW, sMIV, sMLA, sMLA, sMLA, sMTW, sMIV},
 /*
  *	sMSS -> sMIV	Server might not send FIN in this state.
  *	sMS2 -> sMIV
@@ -557,10 +556,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMLA
  *	sMLA -> sMLA	Retransmitted FIN.
  *	sMTW -> sMTW
- *	sMCL -> sMCL
  */
-/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*dataack*/	   { sMIV, sMIG, sMSR, sMES, sMIV, sMCW, sMCW, sMTW, sMTW, sMCL, sMIG},
+/*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*dataack*/	   { sMIV, sMIG, sMSR, sMES, sMIV, sMCW, sMCW, sMTW, sMTW, sMIG},
 /*
  *	sMSS -> sMIG	Might be a half-open connection.
  *	sMS2 -> sMIG
@@ -571,33 +569,49 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMCW -> sMCW
  *	sMLA -> sMTW	Last ACK detected.
  *	sMTW -> sMTW	Retransmitted last ACK.
- *	sMCL -> sMCL
  */
-/*				 sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMS2 */
-/*mpfastclose*/  { sMIV, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL, sMCL},
-/*mpnoopt */	 { sMNO, sMFB, sMFB, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMCL, sMFB}
+/*				 sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpfastclose*/  { sMIV, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW, sMTW},
+/* inf mapping */{ sMFB, sMIV, sMIV, sMFB, sMFB, sMFB, sMFB, sMFB, sMFB, sMIV},
+/*
+ *	sMNO -> sMFB	Assumed established but it falls back
+ *	sMSS -> sMIV	Can't be any DSS while synchronizing
+ *	sMSR -> sMIV
+ *	sMS2 -> sMIV
+ *	sMES -> sMFB	Common case of fallback with a single subflow
+ *	sMNS -> sMIG	Unexpected packet while no subflow should be active
+ *	sMFW -> sMFB	Fallback possible until connection closed
+ *	sMCW -> sMFB
+ *	sMLA -> sMFB	
+ *	sMTW -> sMTW
+ */
+/*				  sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
+/*mpnoopt */	 { sMNO, sMFB, sMFB, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMFB}
 /* idem than ORIGINAL dir */
 	}
 };
 
-/* Timer */
-static void nf_mptcp_death_by_timeout(unsigned long ul_mpct) {
-	struct nf_conn_mptcp *mpct = (struct nf_conn_mptcp*)ul_mpct;
-	pr_debug("nf_mptcp_death_by_timeout: mpct=%p\n",mpct);
+
+void nf_mptcp_put(struct nf_conn_mptcp* mpct) {
 	/* delete references from hashtable: there are 2, one for each token */
+	pr_debug("= nf_mptcp_put(%p) === MPTCP conntrack dead\n", mpct);
 	spin_lock_bh(&mpct->lock);
 	nf_mptcp_hash_remove(mpct);
 	spin_unlock_bh(&mpct->lock);
 	kfree(mpct);
 }
 
+/* Called by timer at its expiration */
+static void nf_mptcp_death_by_timeout(unsigned long ul_mpct) {
+	pr_debug("nf_mptcp_death_by_timeout: mpct=%p\n",(void*)ul_mpct);
+	nf_mptcp_put((struct nf_conn_mptcp*)ul_mpct);
+}
+
 void nf_mptcp_update_timer(struct nf_conn_mptcp *mpct) {
-	BUG_ON(mpct->state != MPTCP_CONNTRACK_NO_SUBFLOW &&
-			mpct->state != MPTCP_CONNTRACK_CLOSED &&
-			mpct->state != MPTCP_CONNTRACK_TIMEWAIT);
+	BUG_ON(mpct->state != MPTCP_CONNTRACK_NO_SUBFLOW);
 	/* adjust the timer or (re)activate it: mptcp conntrack will die whenever the 
 	 * timeout associated to the current state expires*/
-	mod_timer(&mpct->timeout, mptcp_timeouts[mpct->state]);
+	mod_timer(&mpct->timeout, nf_ct_mptcp_timeout_no_subflow);
 }
 
 static void nf_mptcp_delete_timer(struct nf_conn_mptcp *mpct) {
@@ -607,8 +621,8 @@ static void nf_mptcp_delete_timer(struct nf_conn_mptcp *mpct) {
 /* Make the conntrack fall back to single path TCP.
  * mpct access must be locked. */
 void nf_mptcp_fallback(struct nf_conn *ct, struct nf_conn_mptcp *mpct) {
-	/* In case of MPTCP fallback, the MPTCP state can be deleted, that is, go
-	 * to the closed state and set a timer:
+	/* In case of MPTCP fallback, the MPTCP state can be deleted, that is,
+	 * disassociate the subflow and destroy the MPTCP conntrack.
 	 * 1) one MPCAP is invalid/absent
 	 * 2) an infinite mapping is present in both directions 
 	 *
@@ -621,9 +635,7 @@ void nf_mptcp_fallback(struct nf_conn *ct, struct nf_conn_mptcp *mpct) {
 	spin_lock_bh(&ct->lock);
 	ct->proto.tcp.mpmaster = NULL;
 	spin_unlock_bh(&ct->lock);
-
-	mpct->state = MPTCP_CONNTRACK_CLOSED;
-	nf_mptcp_update_timer(mpct);
+	nf_mptcp_put(mpct);
 }
 
 /* compute the token and idsn from key and fill the mp struct with them if
@@ -783,14 +795,10 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	
 
 	switch (new_state) {
-	case MPTCP_CONNTRACK_CLOSED:
-		pr_debug("nf_ct_mptcp_packet: connection is going to be closed.\n");
+	case MPTCP_CONNTRACK_TIMEWAIT:
+		pr_debug("nf_ct_mptcp_packet: waiting for subflows to close before"
+				"removing the mpconntrack.\n");
 		break;
-	case MPTCP_CONNTRACK_FALLBACK:
-			/* the connection is going to fall back, we can destroy
-			 * the conntrack at the MPTCP level */
-			nf_mptcp_fallback(ct, mpct);
-			goto updateTimer;
 	
 	case MPTCP_CONNTRACK_SYN_RECV:
 			/*if (index != MPTCP_CAP_SYN)
@@ -835,6 +843,13 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 			}
 			break;
 
+	case MPTCP_CONNTRACK_FALLBACK:
+		if (mpct->counter_sub == 1) {
+		pr_debug("nf_ct_mptcp_packet: fallback detected, to be confirmed by seqnum\n");
+			break;
+		}
+		pr_debug("nf_ct_mptcp_packet: unexpected packet, features a infinite fallback "
+				"while several subflows in use.\n");
 	case MPTCP_CONNTRACK_IGNORE:
 			pr_debug("nf_ct_mptcp_pkt: unexpected state %u, ignoring packet...", new_state);
 			new_state = old_state;
@@ -856,21 +871,16 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 inwindow:
 	pr_debug("mptcp_packet: in-window => going to be accepted\n");
 
+	if (new_state == MPTCP_CONNTRACK_FALLBACK) {
+		/* the single-subflow connection is going to fall back.
+		 * we can destroy the conntrack at the MPTCP level */
+		nf_mptcp_fallback(ct, mpct);
+	}
+
 updateState:
 	/* Fire the transition */
 	pr_debug("mptcp_packet: effective state update: %s\n", mptcp_conntrack_names[new_state]);
 	mpct->state = new_state;
-updateTimer:
-	/* Activate the timer for destruction if the new state requires it */
-	if (new_state == MPTCP_CONNTRACK_CLOSED || new_state == MPTCP_CONNTRACK_TIMEWAIT) {
-		pr_debug("mptcp_packet: activating timer for destruction!\n");
-		spin_lock_bh(&ct->lock);
-		/* we can safely suppress the reference to the mpct because the mpct
-		 * is going to die anyway */
-		ct->proto.tcp.mpmaster = NULL;
-		spin_unlock_bh(&ct->lock);
-		nf_mptcp_update_timer(mpct);
-	}
 
 	return NF_ACCEPT;
 }
@@ -981,11 +991,8 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 	spin_lock_bh(&mpct->lock);
 
 	/* a packet part of the mptcp connection has been received, a subflow
-	 * is alive, we are sure that the data connection must not die before
-	 * all are destroyed or the data connection has been explicitely closed
-	 * (CLOSED or TIMEWAIT states)  */
-	if (mpct->state != MPTCP_CONNTRACK_CLOSED && mpct->state != MPTCP_CONNTRACK_TIMEWAIT)
-		nf_mptcp_delete_timer(mpct);
+	 * is alive, we are sure that the data connection must not die by timer*/
+	nf_mptcp_delete_timer(mpct);
     
 	/* dispatching */
 	/* Get mptcp packet type and return a pointer mptr to the right option in
@@ -1001,6 +1008,7 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 	case MPTCP_DATA_ACK:
 	case MPTCP_DATA_FIN:
 	case MPTCP_FASTCLOSE:
+	case MPTCP_INFINITE_MAP:
 		/* actual MPTCP-level connection tracking */
 		ret_mp = mptcp_packet(ct, th, ctinfo, pf, skb, mptr);
 	default:
@@ -1020,42 +1028,60 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 }
 
 /* MPTCP subflow tracking -related */
-/* update the subflow counter and MPTCP FSM when a subflow is added
- * Take care of the timer
- * Return true if the FSM state has been effectively changed */
+/* update the subflow counter when a subflow is added
+ * Return true if the new counter is zero, else otherwise */
 bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct) {
 	pr_debug("ct_mptcp: adding subflow\n");
 	mpct->counter_sub += 1;
 	BUG_ON(mpct->counter_sub <= 0);
-	if (mpct->state == MPTCP_CONNTRACK_NO_SUBFLOW) {
-		pr_debug("ct_mptcp: NO_SUBFLOW -> ESTABLISHED\n");
-		mpct->state = MPTCP_CONNTRACK_ESTABLISHED;
-		nf_mptcp_update_timer(mpct);
-		return true;
-	}
-	return false;
+	return !mpct->counter_sub;
 }
-/* update the subflow counter and MPTCP FSM when a subflow is removed
- * Take care of the timer
- * Return true if the FSM state has been effectively changed */
+
+/* Update the subflow counter when a subflow is removed
+ * Return true if the new counter is zero, else otherwise
+ */
 bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct) {
-	pr_debug("ct_mptcp: removing subflow\n");
+	pr_debug("ct_mptcp: removing subflow --> counter=%u\n",mpct->counter_sub-1);
 	mpct->counter_sub -= 1;
 	BUG_ON(mpct->counter_sub < 0);
-	if (mpct->state == MPTCP_CONNTRACK_ESTABLISHED && mpct->counter_sub == 0) {
-		pr_debug("ct_mptcp: ESTABLISHED -> NO_SUBFLOW\n");
-		mpct->state = MPTCP_CONNTRACK_NO_SUBFLOW;
-		nf_mptcp_update_timer(mpct);
-		return true;
+	return !mpct->counter_sub;
+}
+
+/* Update the state and the timers according to the (non)nullity of the
+ * subflows counter 
+ */
+void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter) {
+	switch (mpct->state) {
+	case MPTCP_CONNTRACK_NO_SUBFLOW:
+		if (!zero_counter) {
+			pr_debug("ct_mptcp: NO_SUBFLOW -> ESTABLISHED\n");
+			mpct->state = MPTCP_CONNTRACK_ESTABLISHED;
+			nf_mptcp_delete_timer(mpct);
+		}
+		break;
+	case MPTCP_CONNTRACK_ESTABLISHED:
+		if (zero_counter) {
+			pr_debug("ct_mptcp: ESTABLISHED -> NO_SUBFLOW\n");
+			mpct->state = MPTCP_CONNTRACK_NO_SUBFLOW;
+			nf_mptcp_update_timer(mpct);
+		}
+		break;
+	case MPTCP_CONNTRACK_TIMEWAIT:
+		if (zero_counter) {
+			/* no more subflow on a closed MPTCP connection */
+			nf_mptcp_put(mpct);
+			return;
+		}
+	default:
+		break;
 	}
-	return false;
 }
 
 /* Called whenever a TCP conntrack is going to be destroyed */
 void nf_ct_mptcp_destroy(struct nf_conn *ct) {
 	struct nf_conn_mptcp *mpct;
 	
-	pr_debug("nf_ct_mptcp_destoy: DESTROY\n");
+	pr_debug("nf_ct_mptcp_destroy: DESTROY\n");
 
 	if ((mpct = ct->proto.tcp.mpmaster) == NULL) {
 		pr_debug("nf_ct_mptcp_destroy: nothing to do\n");
@@ -1065,13 +1091,15 @@ void nf_ct_mptcp_destroy(struct nf_conn *ct) {
 	/* the mptcp conntrack does not need to die, it's only one subflow less,
 	 * however, if it was the last subflow, trigger death after timeout */
 	spin_lock_bh(&mpct->lock);
-	nf_mptcp_remove_subflow(mpct);
+	nf_mptcp_update(mpct, nf_mptcp_remove_subflow(mpct));
 	spin_unlock_bh(&mpct->lock);
 }
 
 static int __init nf_conntrack_mptcp_init(void)
 {
 	int i;
+
+/*	nf_ct_mptcp_timeout_no_subflow = 10 * 60 * HZ;*/ /* 10 mins */
 
 	/* hashtable init */
 	for (i = 0; i < NF_MPTCP_HASH_SIZE; i++) {

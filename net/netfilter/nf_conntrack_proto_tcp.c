@@ -32,6 +32,10 @@
 #include <linux/netfilter/nf_conntrack_mptcp.h>
 #endif
 
+#define SECS * HZ
+#define MINS * 60 SECS
+#define HOURS * 60 MINS
+#define DAYS * 24 HOURS
 
 /* "Be conservative in what you do,
     be liberal in what you accept from others."
@@ -54,6 +58,10 @@ static int nf_ct_tcp_max_retrans __read_mostly = 3;
  * marked as INVALID.
  */
 static int nf_ct_mptcp_verify_hash __read_mostly = 0;
+
+/* Time to wait before a MPTCP connection without subflow opened should be
+unsigned int nf_ct_mptcp_timeout_no_subflow __read_mostly = 10 * 60 * HZ; 
+ * considered closed */
 #endif
 
   /* FIXME: Examine ipfilter's timeouts and conntrack transitions more
@@ -71,12 +79,6 @@ static const char *const tcp_conntrack_names[] = {
 	"CLOSE",
 	"SYN_SENT2",
 };
-
-
-#define SECS * HZ
-#define MINS * 60 SECS
-#define HOURS * 60 MINS
-#define DAYS * 24 HOURS
 
 /* RFC1122 says the R2 limit should be at least 100 seconds.
    Linux uses 15 packets as limit, which corresponds
@@ -1265,7 +1267,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			 * state. Do this here instead of when it establishes, so that 
 			 * if it is reset before establishment, the remove subflow 
 			 * doesnt decrement for nothing */
-			nf_mptcp_add_subflow(mpct);
+			nf_mptcp_update(mpct, nf_mptcp_add_subflow(mpct));
 		} else if (mpct) {
 			pr_debug("conntrack: mp_join's token expected but MPTCP "
 					"connection not established, mpct state=%i, ct=%p\n", mpct->state, ct);
@@ -1536,6 +1538,15 @@ static struct ctl_table tcp_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+	/*
+	{
+		.procname	= "nf_conntrack_mptcp_timeout_no_subflow",
+		.data		= &nf_ct_mptcp_timeout_no_subflow,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	*/
 #endif
 	{ }
 };
@@ -1641,6 +1652,14 @@ static struct ctl_table tcp_compat_sysctl_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+	/*
+	{
+		.procname	= "ip_conntrack_mptcp_timeout_no_subflow",
+		.data		= &nf_ct_mptcp_timeout_no_subflow,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},*/
 #endif
 	{ }
 };
