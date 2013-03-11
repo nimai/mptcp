@@ -19,6 +19,7 @@ struct mptcp_subflow_info {
 		u_int16_t len;
 	} map[IP_CT_DIR_MAX];
 	bool established;
+	struct list_head tmp_mpct;
 };
 #endif
 

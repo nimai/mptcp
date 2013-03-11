@@ -53,6 +53,12 @@ struct nf_conn_mptcp {
 	struct timer_list timeout; /* timer for destruction of the data connection state */
 };
 
+struct mpct_ref {
+	struct nf_conn_mptcp *mpct;
+	enum ip_conntrack_dir rel_dir;
+	struct list_head cand_lst;
+};
+
 /* forward ref */
 struct nf_conn;
 
@@ -66,14 +72,14 @@ nf_ct_perdir_to_conntrack(const struct mp_per_dir *mp)
 
 /* return the mptcp dir from the current packet's dir and the subflow original
  * relative dir*/
-static inline enum ip_conntrack_dir nf_mptcp_subdir2dir(struct mptcp_subflow_info *sub, 
-		enum ip_conntrack_dir dir)
-{
-	return sub->rel_dir ^ dir;
-}
+#define subdir2mpdir(reldir, subdir) \
+	((reldir) ^ (subdir))
+
+#define is_subflow(ct) \
+		((ct)->proto.tcp.mpmaster || !list_empty(&(ct)->proto.tcp.mpflow.tmp_mpct))
 
 /* hashtable related */
-struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token);
+bool nf_mptcp_hash_find(u32 token, struct list_head *mplist, enum ip_conntrack_dir dir); 
 bool nf_mptcp_hash_insert(struct mp_per_dir *mp, u32 token);
 void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
 
@@ -99,6 +105,12 @@ struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th,
 void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
 		       u32 *hash_out);
 void nf_mptcp_key_sha1(u64 key, u32 *token, u64 *idsn);
+
+/* hmac check */
+bool nf_mpctp_valid_hmac(struct mptcp_subflow_info *mpsub,
+		u32 *rcvd_hmac, struct nf_conn_mptcp *mpct, 
+		enum ip_conntrack_dir dir, enum ip_conntrack_dir mptcp_dir);
+bool nf_mptcp_hmac_prune_mpct(struct nf_conn *ct, enum ip_conntrack_dir dir, u32 *hmac); 
 
 /* MPTCP connection tracking */
 
@@ -144,6 +156,8 @@ void nf_ct_mptcp_destroy(struct nf_conn *ct);
 
 bool nf_mptcp_add_subflow(struct nf_conn_mptcp *mpct);
 bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct);
+
+struct nf_conn_mptcp *nf_mptcp_try_assoc_subflow(struct nf_conn *ct);
 
 void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter);
 

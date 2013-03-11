@@ -36,21 +36,27 @@ static inline u32 nf_mptcp_hash_tk(u32 token)
 	return token % NF_MPTCP_HASH_SIZE;
 }
 
-/* Return the MPTCP conntrack from a token.
- * This does so by looking up the hashtable
+/* Return true iff at least one MPTCP conntrack has been found with token.
+ * If mplist is non-null, it also build the list of all mpct using given token.
+ * This does so by looking up the hashtable.
  *
  *FIXME Also depends on the direction: it avoids some easy token collisions.
  * /!\ here, dir defines the host, not the dir of the packet.
  * That is, IP_CT_DIR_ORIGINAL designate the connection's initiator, not the
  * fact that the packet handled is transiting in the original dir.
  */
-struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token) 
+bool nf_mptcp_hash_find(u32 token, struct list_head *mplist, 
+		enum ip_conntrack_dir dir) 
 {
 	u32 hash = nf_mptcp_hash_tk(token);
 	struct mp_per_dir *mp;
 	struct nf_conn_mptcp *mpct;
+	bool ret = false;
+	struct mpct_ref *mpref;
 
 	read_lock(&htb_lock);
+	if (mplist) 
+		INIT_LIST_HEAD(mplist);
 	list_for_each_entry(mp, &mptcp_conn_htb[hash], collide_tk) {
         mpct = nf_ct_perdir_to_conntrack(mp);
 		pr_debug("mpct=%p: state=%i, token0=%x (key0=%llx), "
@@ -58,12 +64,26 @@ struct nf_conn_mptcp *nf_mptcp_hash_find(u32 token)
 				mpct->state, mpct->d[0].token, 
 				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 		if (token == mp->token) {
-	        read_unlock(&htb_lock);
-            return nf_ct_perdir_to_conntrack(mp);
+			if (mplist == NULL) { /* we don't want a list, only to know if there's one */
+				ret = true;
+				goto out;
+			}
+			/* allocate struct to list mpconn refs with subflow-specifics */
+			if ((mpref = kmalloc(sizeof(struct mpct_ref), GFP_KERNEL)) == NULL) {
+				pr_debug("Collision handling failed: kmalloc error. Returning.");
+				goto out;
+			}
+			mpref->mpct = mpct;
+			mpref->rel_dir = (mpct->d[dir].token == token)
+				?IP_CT_DIR_ORIGINAL:IP_CT_DIR_REPLY;
+
+            list_add(&mpref->cand_lst, mplist);
+			ret = true;
         }
 	}
+out:
 	read_unlock(&htb_lock);
-	return NULL;
+	return ret;
 }
 
 
@@ -79,11 +99,11 @@ void __nf_mptcp_hash_insert(struct mp_per_dir *mp,
 	write_unlock_bh(&htb_lock);
 }
 /* Idem but check that the entry is not already there. Return true iff the
- * entry has been indeed inserted */
+ * entry has been inserted */
 bool nf_mptcp_hash_insert(struct mp_per_dir *mp, 
 							u32 token)
 {
-	if (nf_mptcp_hash_find(token)) {
+	if (nf_mptcp_hash_find(token, NULL, mp->dir)) {
 		/* already inserted, stop here */
 		return false;
 	}
@@ -117,8 +137,6 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 	}
 }
 /* End of hashtable implem */
-
-
 
 /* Get the token from a mp_join structure from a SYN packet */
 __u32 __nf_mptcp_get_token(struct mp_join *mpj)
@@ -241,6 +259,86 @@ void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,
 	for (i = 0; i < 5; i++)
 		hash_out[i] = cpu_to_be32(hash_out[i]);
 }
+
+bool nf_mptcp_valid_hmac(struct mptcp_subflow_info *mpsub,
+		u32 *rcvd_hmac, struct nf_conn_mptcp *mpct, 
+		enum ip_conntrack_dir dir, enum ip_conntrack_dir mptcp_dir)
+{
+	u64 key1, key2;
+	u32 hash[5];
+	/* First, retrieve the keys in the local structures. */
+	key1 = mpct->d[mptcp_dir].key;
+	key2 = mpct->d[!mptcp_dir].key;
+	pr_debug("tcp_packet: generate hmac to verify for mpct=%p\n", mpct);
+
+	/* effective hashing */
+	nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
+			(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], hash);
+	/* hash received is truncated */
+	if (memcmp(hash, rcvd_hmac, 2)) {
+		pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack "
+				"local=%llx, rem=%llx\n",*((u64*)hash), *((u64*)rcvd_hmac));
+		print_hex_dump_bytes("hmacComputed: ",DUMP_PREFIX_NONE, hash, 8);
+		print_hex_dump_bytes("hmacReceived: ",DUMP_PREFIX_NONE, rcvd_hmac, 8);
+		return false;
+	}
+	return true;
+}
+
+/* Try to associate a subflow ct to a MPTCP Conntrack.
+ * Return mpct iff it succeeds, otherwise NULL.
+ */
+struct nf_conn_mptcp *nf_mptcp_try_assoc_subflow(struct nf_conn *ct)
+{
+	struct list_head *tmp_mpct = &ct->proto.tcp.mpflow.tmp_mpct;
+	struct nf_conn_mptcp *mpct;
+	/* Assume no_collision <=> subflow is part of mpct
+	 * Further verification possible with verify_hmac param */
+	if (!ct->proto.tcp.mpmaster && list_is_singular(tmp_mpct)) {
+		mpct = ct->proto.tcp.mpmaster = 
+			(list_first_entry(tmp_mpct, struct mpct_ref, cand_lst))->mpct;
+		pr_debug("nf_ct_mptcp: found single valid mpct=%p for ct=%p, "
+				"perform subflow assoctiation.\n", ct->proto.tcp.mpmaster, ct);
+		/* TODO delete last entry when association done */
+
+		/* increment the subflow counter and update the MPTCP FSM
+		 * state. Do this here instead of when it establishes, so that 
+		 * if it is reset before establishment, the remove subflow 
+		 * doesnt decrement for nothing */
+		nf_mptcp_update(mpct, nf_mptcp_add_subflow(mpct));
+		return ct->proto.tcp.mpmaster;
+	} 
+	return NULL;
+}
+
+/* prune the list of mptcp conntracks associable with the current conntrack
+ * using the hmacs from mp_join stage.
+ * @return false if there are no more candidate (no association possible)
+ *			true otherwise
+ */
+bool nf_mptcp_hmac_prune_mpct(struct nf_conn *ct, enum ip_conntrack_dir dir, u32 *hmac) 
+{
+	struct mptcp_subflow_info *mpsub = &ct->proto.tcp.mpflow;
+	struct mpct_ref *mpref, *tmp; 
+	/* for each candidate, check the hmac and eliminate the invalid mpct
+	 * candidates */
+	list_for_each_entry_safe(mpref, tmp, &mpsub->tmp_mpct, cand_lst) {
+		if (!nf_mptcp_valid_hmac(mpsub, hmac, mpref->mpct, 
+					dir, subdir2mpdir(mpref->rel_dir, dir))) {
+					/* subdir2mpdir is used to translate dir (related to
+					 * subflow) into the absolute direction of the MPTCP conntrack */
+			pr_debug("collisionHandling: invalid hmac from join ct=%p for mpct=%p\n",
+					ct, mpref->mpct); 
+			list_del(&mpref->cand_lst);
+			kfree(mpref);
+		}
+	}
+	if (!nf_mptcp_try_assoc_subflow(ct) && list_empty(&mpsub->tmp_mpct)) {
+		return false;
+	}
+	return true;
+}
+
 
 /* -- end of utility functions */
 static unsigned int nf_ct_mptcp_timeout_no_subflow  __read_mostly = 10 * 60 * HZ;
@@ -689,7 +787,6 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 	}
 	memset(mpct, 0, sizeof(struct nf_conn_mptcp));
 
-
 	/* initialize the mpct state, only if a conntrack has been created */
 	mpct->counter_sub = 1; /* the MPCAP stage always is the first subflow */
 	/* init the lock protecting access to mptcp conntrack */
@@ -780,7 +877,7 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 	old_state = mpct->state;
 	subdir = CTINFO2DIR(ctinfo);
-	dir = nf_mptcp_subdir2dir(&ct->proto.tcp.mpflow, subdir);
+	dir = subdir2mpdir(ct->proto.tcp.mpflow.rel_dir, subdir);
 	/* parse the packet to retrieve its type for the FSM */
 	index = get_conntrack_index(th);
 	/* look at the new state that it elicits */
