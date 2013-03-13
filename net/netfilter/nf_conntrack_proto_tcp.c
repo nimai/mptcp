@@ -853,15 +853,8 @@ int tcp_packet(struct nf_conn *ct,
 	struct mptcp_subflow_info *mpsub;
 	struct nf_conn_mptcp *mpct;
 	struct mp_join *mptr;
-
-	mpsub = &ct->proto.tcp.mpflow;
-	mpct = ct->proto.tcp.mpmaster;
-	/* mpct not NULL <=> this subflow is part of an MPTCP connection */
-	if (is_subflow(ct))
-		/* mpct cannot be modified by several subflows at the same time */
-		spin_lock_bh(&mpct->lock);
-	pr_debug("tcp_packet: is a mptcp subflow? %s\n", is_subflow(ct)?"YES":"NO");
 #endif
+
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
 
@@ -872,6 +865,12 @@ int tcp_packet(struct nf_conn *ct,
 	new_state = tcp_conntracks[dir][index][old_state];
 	tuple = &ct->tuplehash[dir].tuple;
 	pr_debug("tcp_packet: new state=%s\n",(new_state<TCP_CONNTRACK_MAX)?tcp_conntrack_names[new_state]:"(pseudostate)");
+
+#if defined(CONFIG_NF_CONNTRACK_MPTCP)
+	mpsub = &ct->proto.tcp.mpflow;
+	mpct = ct->proto.tcp.mpmaster; /* could be NULL while in the JOIN stage */
+	pr_debug("tcp_packet: is a mptcp subflow? %s\n", is_subflow(ct)?"YES":"NO");
+#endif
 
 	switch (new_state) {
 	case TCP_CONNTRACK_SYN_SENT:
@@ -1004,10 +1003,10 @@ int tcp_packet(struct nf_conn *ct,
 				 * ignore its content */
 				pr_debug("nf_ct_mptcp: no mpct matches the rcvd hmac from join synack. " 
 						"Marking connection invalid.\n");
+				spin_unlock_bh(&ct->lock);
 				if (LOG_INVALID(net, IPPROTO_TCP))
 					nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 							"nf_ct_mptcp: invalid hash in rcvd mpjoin synack");
-				spin_unlock_bh(&mpct->lock);
 				/* FIXME an injected bad join packet would make the connection
 				 * invalid because there is no seq check */
 				return -NF_ACCEPT;
@@ -1030,7 +1029,7 @@ int tcp_packet(struct nf_conn *ct,
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid pkt in PREESTABLISHED state ");
-					spin_unlock_bh(&mpct->lock);
+					spin_unlock_bh(&ct->lock);
 				/* FIXME an injected bad  packet would make the connection
 				 * invalid because there is no seq check */
 					return -NF_ACCEPT;
@@ -1054,12 +1053,10 @@ int tcp_packet(struct nf_conn *ct,
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
 								"nf_ct_mptcp: invalid hash in rcvd mpjoin ack");
-					spin_unlock_bh(&mpct->lock);
+					spin_unlock_bh(&ct->lock);
 					return -NF_ACCEPT;
 				}
-
 			}
-			spin_unlock_bh(&mpct->lock);
 		}
 		break;
 #endif
@@ -1179,11 +1176,10 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 	const struct ip_ct_tcp_state *sender = &ct->proto.tcp.seen[0];
 	const struct ip_ct_tcp_state *receiver = &ct->proto.tcp.seen[1];
 #ifdef CONFIG_NF_CONNTRACK_MPTCP
-	u32 token;
 	struct nf_conn_mptcp *mpct;
 	struct mpct_ref *mpref, *tmp;
 	struct mptcp_subflow_info *mpsub;
-	struct mptcp_option *mptr;
+	struct mp_join *jptr;
 	bool token_match = false;
 #endif
 
@@ -1214,25 +1210,27 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
-		if (!(mptr = nf_mptcp_get_ptr(th)) || mptr->sub != MPTCP_SUB_JOIN) {
+		if (!(jptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
 			pr_debug("conntrack: no mptcp join found in packet, ct=%p\n",ct);
 			goto nomptcp;
 		}
+		if (!th->syn) /* could still be a third ack according to FSM */
+			return false;
 		/* client is trying to establish a new subflow */
-
 		/* Is this a subflow of an existing MultipathTCP connection ? */
 		/* if we find an existing valid mptcp connection matching 
 		 * this conn's token
 		 * for the original direction, it is highly probable that the
 		 * sender is an end-host of that mptcp connection. */
-		token = __nf_mptcp_get_token((struct mp_join*)mptr);
+		
 		/* initialize and fill the list of candidate mpconntrack for token
 		* seen */
-		token_match = nf_mptcp_hash_find(token, &ct->proto.tcp.mpflow.tmp_mpct, IP_CT_DIR_ORIGINAL);
-		spin_lock_bh(&mpct->lock); /* FIXME location */
+		token_match = nf_mptcp_hash_find(jptr->u.syn.token, 
+				&ct->proto.tcp.mpflow.tmp_mpct, IP_CT_DIR_ORIGINAL);
 		if (token_match) {
 			list_for_each_entry_safe(mpref, tmp, &ct->proto.tcp.mpflow.tmp_mpct, cand_lst) {
 				mpct = mpref->mpct;
+				spin_lock_bh(&mpct->lock);
 				pr_debug("mpct=%p found for ct=%p: state=%i, token0=%x (key0=%llx), "
 						"token1=%x (key1=%llx)\n", mpct, ct, mpct->state, mpct->d[0].token, 
 						mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
@@ -1248,6 +1246,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 					list_del(&mpref->cand_lst);
 					kfree(mpref);
 				}
+				spin_unlock_bh(&mpct->lock);
 			}
 
 			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
@@ -1258,11 +1257,10 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 			/*__set_bit(IPS_NEW_SUBFLOW_BIT, &ct->status);*/
 			/* Fill the subflow specific structure - already alloc by ct */
 			mpsub = &ct->proto.tcp.mpflow;
-			mpsub->addr_id = ((struct mp_join*)mptr)->addr_id;
+			mpsub->addr_id = jptr->addr_id;
 			/* the direction is the same as mpct if rcvd token is the one from
 			 * original direction of mpct */
-			mpsub->nonce[IP_CT_DIR_ORIGINAL] = 
-				((struct mp_join*)mptr)->u.syn.nonce;
+			mpsub->nonce[IP_CT_DIR_ORIGINAL] = jptr->u.syn.nonce;
 			/* for preestablished state */
 			mpsub->established = false;
 
@@ -1272,10 +1270,8 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		} else { /* no token matches */
 			pr_debug("conntrack: unexpected token in mp_join segment,"
 					"ct=%p\n",ct);
-			spin_unlock_bh(&mpct->lock);
 			return false;
 		}
-		spin_unlock_bh(&mpct->lock);
 #endif /* CONFIG_NF_CONNTRACK_MPTCP */
 	} else if (nf_ct_tcp_loose == 0) {
 		/* Don't try to pick up connections. */

@@ -58,7 +58,7 @@ bool nf_mptcp_hash_find(u32 token, struct list_head *mplist,
 	if (mplist) 
 		INIT_LIST_HEAD(mplist);
 	list_for_each_entry(mp, &mptcp_conn_htb[hash], collide_tk) {
-        mpct = nf_ct_perdir_to_conntrack(mp);
+        mpct = perdir_to_mpct(mp);
 		pr_debug("mpct=%p: state=%i, token0=%x (key0=%llx), "
 				"token1=%x (key1=%llx)\n", mpct,
 				mpct->state, mpct->d[0].token, 
@@ -127,7 +127,7 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 	struct mp_per_dir *mp, *tmp;
 	struct nf_conn_mptcp *mpct;
 	list_for_each_entry_safe(mp, tmp, bucket, collide_tk) {
-		mpct = nf_ct_perdir_to_conntrack(mp);
+		mpct = perdir_to_mpct(mp);
 		/* the 2 parts of the conntracks must be removed from the hashtable
 		 * before the freeing, else, we wouldn't have any reference left to
 		 * remove it later */
@@ -137,34 +137,6 @@ void nf_mptcp_hash_free(struct list_head *bucket)
 	}
 }
 /* End of hashtable implem */
-
-/* Get the token from a mp_join structure from a SYN packet */
-__u32 __nf_mptcp_get_token(struct mp_join *mpj)
-{
-    if (mpj && mpj->u.syn.token)
-        return mpj->u.syn.token;
-    return 0;
-}
-
-/* Get the token from a TCP header of a SYN packet */
-__u32 nf_mptcp_get_token(const struct tcphdr *th)
-{
-    struct mp_join *mpj;
-    /* The token is only available in a SYN segment */
-    if (!th->syn)
-        return 0;
-
-    mpj = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN);
-	return __nf_mptcp_get_token(mpj);
-}
-
-
-u64 __nf_mptcp_get_key(struct mp_capable * mpc)
-{
-	if (mpc && mpc->sender_key)
-		return mpc->sender_key;
-	return 0;
-}
 
 /* Return the token and initial data sequence number from a 64bits key. 
  * This is a copy of mptcp_key_sha1() from net/mptcp/mptcp_ctrl.c as the
@@ -266,7 +238,10 @@ bool nf_mptcp_valid_hmac(struct mptcp_subflow_info *mpsub,
 {
 	u64 key1, key2;
 	u32 hash[5];
+
+	spin_lock_bh(&mpct->lock);
 	/* First, retrieve the keys in the local structures. */
+	pr_debug("validate_hmac: mptcp_dir=%i, dir=%i\n", mptcp_dir, dir);
 	key1 = mpct->d[mptcp_dir].key;
 	key2 = mpct->d[!mptcp_dir].key;
 	pr_debug("tcp_packet: generate hmac to verify for mpct=%p\n", mpct);
@@ -291,22 +266,27 @@ bool nf_mptcp_valid_hmac(struct mptcp_subflow_info *mpsub,
 struct nf_conn_mptcp *nf_mptcp_try_assoc_subflow(struct nf_conn *ct)
 {
 	struct list_head *tmp_mpct = &ct->proto.tcp.mpflow.tmp_mpct;
+	struct mpct_ref *mpref;
 	struct nf_conn_mptcp *mpct;
 	/* Assume no_collision <=> subflow is part of mpct
 	 * Further verification possible with verify_hmac param */
 	if (!ct->proto.tcp.mpmaster && list_is_singular(tmp_mpct)) {
-		mpct = ct->proto.tcp.mpmaster = 
-			(list_first_entry(tmp_mpct, struct mpct_ref, cand_lst))->mpct;
+		mpref = list_first_entry(tmp_mpct, struct mpct_ref, cand_lst);
+		mpct = ct->proto.tcp.mpmaster = mpref->mpct;
 		pr_debug("nf_ct_mptcp: found single valid mpct=%p for ct=%p, "
-				"perform subflow assoctiation.\n", ct->proto.tcp.mpmaster, ct);
-		/* TODO delete last entry when association done */
+				"perform subflow assoctiation.\n", mpct, ct);
+		/* FIXME MAYBE design: delete last entry when association done? 
+		list_del(&mpref->cand_lst);
+		 */
 
 		/* increment the subflow counter and update the MPTCP FSM
 		 * state. Do this here instead of when it establishes, so that 
 		 * if it is reset before establishment, the remove subflow 
 		 * doesnt decrement for nothing */
+		spin_lock_bh(&mpct->lock);
 		nf_mptcp_update(mpct, nf_mptcp_add_subflow(mpct));
-		return ct->proto.tcp.mpmaster;
+		spin_unlock_bh(&mpct->lock);
+		return mpct;
 	} 
 	return NULL;
 }
@@ -324,9 +304,9 @@ bool nf_mptcp_hmac_prune_mpct(struct nf_conn *ct, enum ip_conntrack_dir dir, u32
 	 * candidates */
 	list_for_each_entry_safe(mpref, tmp, &mpsub->tmp_mpct, cand_lst) {
 		if (!nf_mptcp_valid_hmac(mpsub, hmac, mpref->mpct, 
-					dir, subdir2mpdir(mpref->rel_dir, dir))) {
-					/* subdir2mpdir is used to translate dir (related to
+					/* subdir_to_mpdir is used to translate dir (related to
 					 * subflow) into the absolute direction of the MPTCP conntrack */
+					dir, subdir_to_mpdir(mpref->rel_dir, dir))) {
 			pr_debug("collisionHandling: invalid hmac from join ct=%p for mpct=%p\n",
 					ct, mpref->mpct); 
 			list_del(&mpref->cand_lst);
@@ -877,7 +857,7 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
 	old_state = mpct->state;
 	subdir = CTINFO2DIR(ctinfo);
-	dir = subdir2mpdir(ct->proto.tcp.mpflow.rel_dir, subdir);
+	dir = subdir_to_mpdir(ct->proto.tcp.mpflow.rel_dir, subdir);
 	/* parse the packet to retrieve its type for the FSM */
 	index = get_conntrack_index(th);
 	/* look at the new state that it elicits */
