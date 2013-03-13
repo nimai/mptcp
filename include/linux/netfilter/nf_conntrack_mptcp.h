@@ -62,17 +62,12 @@ struct mpct_ref {
 /* forward ref */
 struct nf_conn;
 
-static inline struct nf_conn_mptcp *
-nf_ct_perdir_to_conntrack(const struct mp_per_dir *mp)
-{
-	pr_debug("mpdir=%p, mpdir->dir=%i\n", mp, mp->dir);
-	return container_of(mp, struct nf_conn_mptcp,
-			    d[mp->dir]);
-}
+#define perdir_to_mpct(mp) \
+	container_of((mp), struct nf_conn_mptcp, d[(mp)->dir])
 
 /* return the mptcp dir from the current packet's dir and the subflow original
  * relative dir*/
-#define subdir2mpdir(reldir, subdir) \
+#define subdir_to_mpdir(reldir, subdir) \
 	((reldir) ^ (subdir))
 
 #define is_subflow(ct) \
@@ -85,9 +80,6 @@ void nf_mptcp_hash_remove(struct nf_conn_mptcp *mpconn);
 
 
 /* general use functions for MPTCP */
-u32 nf_mptcp_get_token(const struct tcphdr *th);
-u32 __nf_mptcp_get_token(struct mp_join *mpj);
-
 struct mptcp_option *nf_mptcp_get_ptr(const struct tcphdr *th);
 
 struct mptcp_option *nf_mptcp_get_mpopt(const struct tcphdr *th, u8 *hptr, 

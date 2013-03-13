@@ -74,7 +74,7 @@ bool nf_mptcp_hash_find(u32 token, struct list_head *mplist,
 				goto out;
 			}
 			mpref->mpct = mpct;
-			mpref->rel_dir = (mpct->d[dir].token == token)
+			mpref->rel_dir = !(mpct->d[dir].token == token)
 				?IP_CT_DIR_ORIGINAL:IP_CT_DIR_REPLY;
 
             list_add(&mpref->cand_lst, mplist);
@@ -249,14 +249,18 @@ bool nf_mptcp_valid_hmac(struct mptcp_subflow_info *mpsub,
 	/* effective hashing */
 	nf_mptcp_hmac_sha1((u8*)&key1, (u8*)&key2, 
 			(u8*)&mpsub->nonce[dir], (u8*)&mpsub->nonce[!dir], hash);
-	/* hash received is truncated */
-	if (memcmp(hash, rcvd_hmac, 2)) {
-		pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack "
-				"local=%llx, rem=%llx\n",*((u64*)hash), *((u64*)rcvd_hmac));
-		print_hex_dump_bytes("hmacComputed: ",DUMP_PREFIX_NONE, hash, 8);
-		print_hex_dump_bytes("hmacReceived: ",DUMP_PREFIX_NONE, rcvd_hmac, 8);
+	/* hash received is truncated for the SYNACK, but not for the ACK */
+	if (memcmp(hash, rcvd_hmac, (dir == IP_CT_DIR_ORIGINAL)?20:8) != 0) {
+		pr_debug("nf_ct_mptcp: invalid hash in rcvd mpjoin synack: \n");
+		/*"local=%llx, rem=%llx\n",*((u64*)hash),*((u64*)rcvd_hmac));*/
+		pr_debug("key1=0x%llx, key2=0x%llx, nonce1=0x%x, nonce2=0x%x\n", 
+				key1, key2, mpsub->nonce[dir], mpsub->nonce[!dir]);
+		print_hex_dump_bytes("   hmacComputed: ",DUMP_PREFIX_NONE, hash, 20);
+		print_hex_dump_bytes("   hmacReceived: ",DUMP_PREFIX_NONE, rcvd_hmac, dir?8:20);
+		spin_unlock_bh(&mpct->lock);
 		return false;
 	}
+	spin_unlock_bh(&mpct->lock);
 	return true;
 }
 
