@@ -1019,12 +1019,12 @@ int tcp_packet(struct nf_conn *ct,
 			 * ct->proto.tcp.mpflow.established?"yes":"no");*/
 			if (!(mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
 				/* Emulation of PREESTABLISHED state:
-				 * tcp_state==ESTABLISHED && subflow_established==false
+				 * JOINed subflow && tcp_state==ESTABLISHED && subflow_established==false
 				 * <=> subflow_state==PREESTABLISHED
 				 * Only an ack can be received in this state.it can
 				 * also be a retransmission of the previous ACK+MP_JOIN =>
 				 * avoid those to set the subflow state to established*/
-				if (index != TCP_ACK_SET) {
+				if (index != TCP_ACK_SET || dir != IP_CT_DIR_REPLY) {
 					pr_debug("tcp_packet: invalid pkt in PREESTABLISHED state\n");
 					if (LOG_INVALID(net, IPPROTO_TCP))
 						nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
@@ -1032,7 +1032,7 @@ int tcp_packet(struct nf_conn *ct,
 					spin_unlock_bh(&ct->lock);
 				/* FIXME an injected bad  packet would make the connection
 				 * invalid because there is no seq check */
-					return -NF_ACCEPT;
+					return NF_DROP;
 				}
 				/* If we see the final ACK without any MPTCP option, we can now 
 				 * pass in the subflow ESTABLISHED state. */

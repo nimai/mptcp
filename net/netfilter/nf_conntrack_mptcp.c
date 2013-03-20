@@ -677,9 +677,7 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 void nf_mptcp_put(struct nf_conn_mptcp* mpct) {
 	/* delete references from hashtable: there are 2, one for each token */
 	pr_debug("= nf_mptcp_put(%p) === MPTCP conntrack dead\n", mpct);
-	spin_lock_bh(&mpct->lock);
 	nf_mptcp_hash_remove(mpct);
-	spin_unlock_bh(&mpct->lock);
 	kfree(mpct);
 }
 
@@ -781,6 +779,7 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 	mpsub = &ct->proto.tcp.mpflow;
 	/* Fill subflow-related info as well */
 	mpsub->addr_id = 0; /* first subflow is always 0 */
+	mpsub->established = true; /* assume true as useful only for joining subflow */
 	/* relative direction is always ORIGINAL for original subflow by definition */
 	mpsub->rel_dir = IP_CT_DIR_ORIGINAL; 
 	/* Keep a ref to master mptcp connnection in every subflow conntrack */
@@ -955,7 +954,9 @@ inwindow:
 	if (new_state == MPTCP_CONNTRACK_FALLBACK) {
 		/* the single-subflow connection is going to fall back.
 		 * we can destroy the conntrack at the MPTCP level */
+		spin_unlock_bh(&mpct->lock);
 		nf_mptcp_fallback(ct, mpct);
+		return NF_ACCEPT;
 	}
 
 updateState:
@@ -1150,6 +1151,7 @@ void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter) {
 	case MPTCP_CONNTRACK_TIMEWAIT:
 		if (zero_counter) {
 			/* no more subflow on a closed MPTCP connection */
+			spin_unlock_bh(&mpct->lock);
 			nf_mptcp_put(mpct);
 			return;
 		}
