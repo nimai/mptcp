@@ -1249,6 +1249,12 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 				spin_unlock_bh(&mpct->lock);
 			}
 
+			/* If no mpct matches, we mark this packet INVALID */
+			if (!is_subflow(ct)) {
+				pr_debug("tcp_new:join: not a valid new subflow."); 
+				return false;
+			}
+
 			pr_debug("conntrack: new mptcp subflow arrives ct=%p\n",ct);
 			/* mark as RELATED/SUBFLOW: possibly wrong if there's a token
 			 * collision. However, the real verification (HMAC) will be
