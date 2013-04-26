@@ -1,9 +1,3 @@
-#if 0
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/module.h>
-#endif
-
 #include <linux/types.h>
 #include <linux/timer.h>
 #include <linux/module.h>
@@ -37,7 +31,7 @@ static inline u32 nf_mptcp_hash_tk(u32 token)
 }
 
 /* Return true iff at least one MPTCP conntrack has been found with token.
- * If mplist is non-null, it also build the list of all mpct using given token.
+ * If mplist is non-null, it also builds the list of all mpct using given token.
  * This does so by looking up the hashtable.
  *
  *FIXME Also depends on the direction: it avoids some easy token collisions.
@@ -59,17 +53,17 @@ bool nf_mptcp_hash_find(u32 token, struct list_head *mplist,
 		INIT_LIST_HEAD(mplist);
 	list_for_each_entry(mp, &mptcp_conn_htb[hash], collide_tk) {
         mpct = perdir_to_mpct(mp);
-		pr_debug("mpct=%p: state=%i, token0=%x (key0=%llx), "
+		if (token == mp->token) {
+			pr_debug("mpct=%p: state=%i, token0=%x (key0=%llx), "
 				"token1=%x (key1=%llx)\n", mpct,
 				mpct->state, mpct->d[0].token, 
 				mpct->d[0].key, mpct->d[1].token, mpct->d[1].key);
-		if (token == mp->token) {
 			if (mplist == NULL) { /* we don't want a list, only to know if there's one */
 				ret = true;
 				goto out;
 			}
 			/* allocate struct to list mpconn refs with subflow-specifics */
-			if ((mpref = kmalloc(sizeof(struct mpct_ref), GFP_KERNEL)) == NULL) {
+			if ((mpref = kmalloc(sizeof(struct mpct_ref), GFP_ATOMIC)) == NULL) {
 				pr_debug("Collision handling failed: kmalloc error. Returning.");
 				goto out;
 			}
@@ -241,7 +235,7 @@ bool nf_mptcp_valid_hmac(struct mptcp_subflow_info *mpsub,
 
 	spin_lock_bh(&mpct->lock);
 	/* First, retrieve the keys in the local structures. */
-	pr_debug("validate_hmac: mptcp_dir=%i, dir=%i\n", mptcp_dir, dir);
+	/*pr_debug("validate_hmac: mptcp_dir=%i, dir=%i\n", mptcp_dir, dir);*/
 	key1 = mpct->d[mptcp_dir].key;
 	key2 = mpct->d[!mptcp_dir].key;
 	pr_debug("tcp_packet: generate hmac to verify for mpct=%p\n", mpct);
@@ -399,17 +393,13 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 	
 	/* iterates over the mptcp options until one matching packet-type is found */
 	for_each_mpopt(opt, subtype, len, tcph) {
-		pr_debug("nf_mptcp: get_index: opt=%p, subtype=%i, len=%u\n",opt,subtype,len);
 		*mp = (struct mptcp_option*)opt;
 		switch (subtype) {
 		case MPTCP_SUB_JOIN:
-			pr_debug("nf_mptcp JOIN: SYN=%u, ACK=%u\n",tcph->syn, tcph->ack); 
 			if (tcph->syn) return (tcph->ack ? MPTCP_JOIN_SYNACK : MPTCP_JOIN_SYN);
 			else if (tcph->ack) return MPTCP_JOIN_ACK;
 			return MPTCP_INVALID;
 		case MPTCP_SUB_CAPABLE:
-			pr_debug("nf_mptcp CAP: SYN=%u, ACK=%u, senderkey=%llx, otherkey=%llx\n",tcph->syn, tcph->ack, 
-					((struct mp_capable*)*mp)->sender_key, (~tcph->syn & tcph->ack)?((struct mp_capable*)*mp)->receiver_key:0);
 			if (tcph->syn) return (tcph->ack ? MPTCP_CAP_SYNACK : MPTCP_CAP_SYN);
 			else if (tcph->ack) return MPTCP_CAP_ACK;
 			return MPTCP_INVALID;
@@ -421,9 +411,6 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			return MPTCP_INVALID;
 		case MPTCP_SUB_DSS:
 			mpdss = (struct mp_dss*)*mp;
-			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits)\n",mpdss->F,
-					mpdss->A, mpdss->a?64:32,
-					mpdss->M, mpdss->m?64:32);
 			if (mpdss->F) return MPTCP_DATA_FIN;
 			else if (mpdss->A) return MPTCP_DATA_ACK;
 			else if (mpdss->M) {
@@ -437,10 +424,50 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			break;
 		}
 	}
-
-	pr_debug("nf_ct_mptcp_get_index: no mptcp option detected.\n");
 	*mp = NULL;
 	return MPTCP_NOOPT;
+}
+
+static void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph) 
+{
+	u8 *opt; /*(struct mptcp_option*)(tcph + 1); skip the common tcp header */
+	struct mp_dss *mpdss;
+	unsigned int len;
+	short subtype;
+	
+	/* iterates over the mptcp options until one matching packet-type is found */
+	for_each_mpopt(opt, subtype, len, tcph) {
+		pr_debug("nf_mptcp: get_index: opt=%p, subtype=%i, len=%u\n",opt,subtype,len);
+		switch (subtype) {
+		case MPTCP_SUB_JOIN:
+			pr_debug("nf_mptcp JOIN: SYN=%u, ACK=%u\n",tcph->syn, tcph->ack); 
+			return;
+		case MPTCP_SUB_CAPABLE:
+			pr_debug("nf_mptcp CAP: SYN=%u, ACK=%u, senderkey=%llx, otherkey=%llx\n",tcph->syn, tcph->ack, 
+					((struct mp_capable*)opt)->sender_key, (~tcph->syn & tcph->ack)?((struct mp_capable*)opt)->receiver_key:0);
+			return;
+		case MPTCP_SUB_FAIL:
+			pr_debug("nf_mptcp FAIL\n");
+			return;
+		case MPTCP_SUB_FCLOSE:
+			pr_debug("nf_mptcp FASTCLOSE\n");
+			return;
+		case MPTCP_SUB_DSS:
+			mpdss = (struct mp_dss*)opt;
+			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits)\n",mpdss->F,
+					mpdss->A, mpdss->a?64:32,
+					mpdss->M, mpdss->m?64:32);
+			if (mpdss->M) {
+				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0) {
+					pr_debug("nf_mptcp: infinite map detected\n");
+				}
+			}
+			return;
+		default:
+			break;
+		}
+	}
+	pr_debug("nf_ct_mptcp_get_index: no mptcp option detected.\n");
 }
 
 /* Special get_conntrack_index for use with MPTCP's FSM */
@@ -468,8 +495,10 @@ static enum mptcp_pkt_type get_conntrack_index(const struct tcphdr *tcph)
 static enum mptcp_pkt_type mptcp_check_combination(const struct tcphdr *tcph)
 {
 	struct mptcp_option *mp;
-	pr_debug("Checking MPTCP packet flags combination\n");
-	return __get_conntrack_index(tcph, &mp);
+	enum mptcp_pkt_type ret;
+	if ((ret = __get_conntrack_index(tcph, &mp)) == MPTCP_INVALID)
+		pr_debug("Invalid MPTCP packet flags combination\n");
+	return ret;	
 }
 
 /* MPTCP state transition table */
@@ -752,6 +781,8 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 	enum mptcp_pkt_type index;
 	
 	index = get_conntrack_index(th);
+	nf_mptcp_dbgprint_pkt(th);
+
 	/* look at the eventual transition that the packet would fire */
 	new_state = mptcp_conntracks[0][index][MPTCP_CONNTRACK_NONE];
 
@@ -850,7 +881,6 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	unsigned int index;
 	struct net *net = nf_ct_net(ct);
 	
-	pr_debug("mptcp_packet: ENTERING MPTCP PACKET\n");
 	
 	mpct = ct->proto.tcp.mpmaster;
 	if (mpct)
@@ -863,13 +893,17 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	dir = subdir_to_mpdir(ct->proto.tcp.mpflow.rel_dir, subdir);
 	/* parse the packet to retrieve its type for the FSM */
 	index = get_conntrack_index(th);
+
 	/* look at the new state that it elicits */
 	new_state = mptcp_conntracks[dir][index][old_state];
 	/* retrieve the per-dir local info */
 	tuple = &ct->tuplehash[dir].tuple;
 	mp = &mpct->d[dir];
 		
-	pr_debug("nf_ct_mptcp_packet: received segmenttype %i, oldstate %s -> newstate %s\n",
+	pr_debug("---\n");
+	nf_mptcp_dbgprint_pkt(th);
+	pr_debug("nf_ct_mptcp_packet: rcvd type %i, oldstate %s --> newstate %s\n"
+			 "---\n",
 			index, mptcp_conntrack_names[old_state], 
 			(new_state<MPTCP_CONNTRACK_MAX)?mptcp_conntrack_names[new_state]:"(pseudostate)");
 	
@@ -949,7 +983,9 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 	/* Window checking should be performed here */
 
 inwindow:
-	pr_debug("mptcp_packet: in-window => going to be accepted\n");
+	/*
+	 * pr_debug("mptcp_packet: in-window => going to be accepted\n");
+	 */
 
 	if (new_state == MPTCP_CONNTRACK_FALLBACK) {
 		/* the single-subflow connection is going to fall back.
@@ -983,7 +1019,6 @@ int nf_ct_mptcp_error(struct net *net, struct nf_conn *tmpl,
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);
 	ret =  tcp_error(net, tmpl, skb, dataoff, ctinfo, pf, hooknum);
-	pr_debug("mptcp_error: return of tcp_error=%i",ret);
 
 	/* FIXME : doesnt check add_addr and remove_addr*/
 	if (mptcp_check_combination(th) == MPTCP_INVALID) {
@@ -1028,8 +1063,9 @@ bool nf_ct_mptcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		ret_mp = mpcap_new(ct, th, mptr);
 		break;
 	default:
-		pr_debug("mptcp_new: index %u not handled by MPTCP FSM\n", index);
-		/* FIXME */
+		/* FIXME 
+		 * pr_debug("mptcp_new: index %u not handled by MPTCP FSM\n", index);
+		 */
 		break;
 	}
 	pr_debug("mptcp_new: Ok, ret=%u, ret_mp=%u\n", ret, ret_mp);
@@ -1056,7 +1092,6 @@ int nf_ct_mptcp_packet(struct nf_conn *ct,
 
 	/* first handle as single path packet */
 	ret = tcp_packet(ct, skb, dataoff, ctinfo, pf, hooknum);
-	pr_debug("mptcp_packet: tcp_packet returned %i\n",ret);
 
 	th = skb_header_pointer(skb, dataoff, sizeof(_tcph), &_tcph);
 	BUG_ON(th == NULL);

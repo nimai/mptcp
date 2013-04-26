@@ -983,8 +983,6 @@ int tcp_packet(struct nf_conn *ct,
 	
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
 	case TCP_CONNTRACK_SYN_RECV:
-		pr_debug("tcp_packet: SYN_RECV - nf_ct_mptcp_verify_hmac = %u\n",
-				nf_ct_mptcp_verify_hmac); 
 		/* JOIN SYNACK HMAC verification ? */
 		if (index == TCP_SYNACK_SET 
 			&& (mptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))
@@ -996,7 +994,8 @@ int tcp_packet(struct nf_conn *ct,
 			/* store nonce, but not hmac since not necessary and takes memory */
 			mpsub->nonce[dir] = mptr->u.synack.nonce;
 
-			pr_debug("tcp_packet: JOIN SYNACK: verify hmac, mptr=%p\n",mptr);
+			/*pr_debug("tcp_packet: JOIN SYNACK: verify hmac, mptr=%p\n",mptr);
+			 */
 			if (unlikely(!nf_mptcp_hmac_prune_mpct(ct, dir, (u32*)&mptr->u.synack.mac))) {  
 				/* if the hmac is incorrect for any mptcp conntrack matching
 				 * the token, mark the packet as INVALID and
@@ -1045,8 +1044,9 @@ int tcp_packet(struct nf_conn *ct,
 					&& index == TCP_ACK_SET
 					&& ((mpct && nf_ct_mptcp_verify_hmac) 
 						|| (!mpct && !list_empty(&mpsub->tmp_mpct)))) {
-				/* We have a MPJOIN+ACK, check the hash against the local data */
-				pr_debug("tcp_packet: JOIN ACK: verify hmac, mptr=%p\n",mptr);
+				/* We have a MPJOIN+ACK, check the hash against the local data 
+				 * pr_debug("tcp_packet: JOIN ACK: verify hmac, mptr=%p\n",mptr);
+				 */
 				if (unlikely(!nf_mptcp_hmac_prune_mpct(ct, dir, (u32*)&mptr->u.ack.mac))) {  
 					pr_debug("nf_ct_mptcp: no mpct matches the rcvd hmac from join ack. " 
 							"Marking connection invalid.\n");
@@ -1223,8 +1223,8 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		 * for the original direction, it is highly probable that the
 		 * sender is an end-host of that mptcp connection. */
 		
-		/* initialize and fill the list of candidate mpconntrack for token
-		* seen */
+		/* initialize and fill the list of candidate mpconntrack tmp_mpct
+		 * for token seen */
 		token_match = nf_mptcp_hash_find(jptr->u.syn.token, 
 				&ct->proto.tcp.mpflow.tmp_mpct, IP_CT_DIR_ORIGINAL);
 		if (token_match) {
