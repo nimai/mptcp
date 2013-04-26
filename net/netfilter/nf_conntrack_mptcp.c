@@ -287,9 +287,7 @@ struct nf_conn_mptcp *nf_mptcp_try_assoc_subflow(struct nf_conn *ct)
 		 * state. Do this here instead of when it establishes, so that 
 		 * if it is reset before establishment, the remove subflow 
 		 * doesnt decrement for nothing */
-		spin_lock_bh(&mpct->lock);
 		nf_mptcp_update(mpct, nf_mptcp_add_subflow(mpct));
-		spin_unlock_bh(&mpct->lock);
 		return mpct;
 	} 
 	return NULL;
@@ -677,7 +675,9 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
 void nf_mptcp_put(struct nf_conn_mptcp* mpct) {
 	/* delete references from hashtable: there are 2, one for each token */
 	pr_debug("= nf_mptcp_put(%p) === MPTCP conntrack dead\n", mpct);
+	spin_lock_bh(&mpct->lock);
 	nf_mptcp_hash_remove(mpct);
+	spin_unlock_bh(&mpct->lock);
 	kfree(mpct);
 }
 
@@ -762,7 +762,7 @@ static bool mpcap_new(struct nf_conn *ct, const struct tcphdr *th,
 	}
 
 	/* allocate the conntrack */
-	if ((mpct = kmalloc(sizeof(struct nf_conn_mptcp), GFP_KERNEL)) == NULL) {
+	if ((mpct = kmalloc(sizeof(struct nf_conn_mptcp), GFP_ATOMIC)) == NULL) {
 		pr_debug("nf_ct_mptcp new: cannot allocate the mptcp conntrack, "
 				"the connection won't be tracked.\n");
 		return false;
@@ -1133,6 +1133,7 @@ bool nf_mptcp_remove_subflow(struct nf_conn_mptcp *mpct) {
  * subflows counter 
  */
 void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter) {
+	spin_lock_bh(&mpct->lock);
 	switch (mpct->state) {
 	case MPTCP_CONNTRACK_NO_SUBFLOW:
 		if (!zero_counter) {
@@ -1158,6 +1159,7 @@ void nf_mptcp_update(struct nf_conn_mptcp *mpct, bool zero_counter) {
 	default:
 		break;
 	}
+	spin_unlock_bh(&mpct->lock);
 }
 
 /* Called whenever a TCP conntrack is going to be destroyed */
@@ -1173,9 +1175,7 @@ void nf_ct_mptcp_destroy(struct nf_conn *ct) {
 	
 	/* the mptcp conntrack does not need to die, it's only one subflow less,
 	 * however, if it was the last subflow, trigger death after timeout */
-	spin_lock_bh(&mpct->lock);
 	nf_mptcp_update(mpct, nf_mptcp_remove_subflow(mpct));
-	spin_unlock_bh(&mpct->lock);
 }
 
 static int __init nf_conntrack_mptcp_init(void)
