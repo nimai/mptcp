@@ -566,12 +566,12 @@ static const u8 mptcp_conntracks[2][MPTCP_PKT_INDEX_MAX][MPTCP_CONNTRACK_MAX] = 
  *	sMTW -> sMTW
  */
 /*				sMNO, sMSS, sMSR, sMES, sMNS, sMFW, sMCW, sMLA, sMTW, sMS2 */
-/*dataack*/	   { sMES, sMIV, sMIV, sMES, sMIG, sMCW, sMCW, sMTW, sMTW, sMIV},
+/*dataack*/	   { sMES, sMIV, sMES, sMES, sMIG, sMCW, sMCW, sMTW, sMTW, sMIV},
 /*
  *	sMNO -> sMES	Assumed.
  *	sMSS -> sMIV	ACK is invalid: we haven't seen a SYN/ACK yet.
  *	sMS2 -> sMIV
- *	sMSR -> sMIV	MPCAP should have been received before any dataack	
+ *	sMSR -> sMES	MPCAP ack doesnt need to be received before a dataack	
  *	sMES -> sMES	
  *	sMNS -> sMIG	Unexpected packet while no subflow should be active
  *	sMFW -> sMCW	Normal close request answered by ACK.
