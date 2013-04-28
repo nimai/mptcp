@@ -92,6 +92,8 @@ struct mptcp_option *nf_mptcp_get_mpopt(const struct tcphdr *th, u8 *hptr,
 struct mptcp_option *nf_mptcp_find_subtype(const struct tcphdr *th, 
 		unsigned int subtype);
 
+void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph); 
+
 
 /* crypto functions */
 void nf_mptcp_hmac_sha1(u8 *key_1, u8 *key_2, u8 *rand_1, u8 *rand_2,

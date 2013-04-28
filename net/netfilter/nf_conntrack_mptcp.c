@@ -416,6 +416,7 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			else if (mpdss->M) {
 				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0)
 					return MPTCP_INFINITE_MAP;
+				/* FIXME : detection of datalen is wrong */
 				else
 					return MPTCP_DATA_MAP;
 			}
@@ -428,7 +429,7 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 	return MPTCP_NOOPT;
 }
 
-static void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph) 
+void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph) 
 {
 	u8 *opt; /*(struct mptcp_option*)(tcph + 1); skip the common tcp header */
 	struct mp_dss *mpdss;
@@ -454,9 +455,12 @@ static void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph)
 			return;
 		case MPTCP_SUB_DSS:
 			mpdss = (struct mp_dss*)opt;
-			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits)\n",mpdss->F,
+			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits), datalen=%i\n",
+					mpdss->F,
 					mpdss->A, mpdss->a?64:32,
-					mpdss->M, mpdss->m?64:32);
+					mpdss->M, mpdss->m?64:32,
+					mpdss->M?ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))):-1); 
+			
 			if (mpdss->M) {
 				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0) {
 					pr_debug("nf_mptcp: infinite map detected\n");
@@ -464,10 +468,9 @@ static void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph)
 			}
 			return;
 		default:
-			break;
+			pr_debug("nf_ct_mptcp_get_index: no mptcp option detected.\n");
 		}
 	}
-	pr_debug("nf_ct_mptcp_get_index: no mptcp option detected.\n");
 }
 
 /* Special get_conntrack_index for use with MPTCP's FSM */
@@ -965,16 +968,16 @@ static int mptcp_packet(struct nf_conn *ct, const struct tcphdr *th,
 		pr_debug("nf_ct_mptcp_packet: unexpected packet, features a infinite fallback "
 				"while several subflows in use.\n");
 	case MPTCP_CONNTRACK_IGNORE:
-			pr_debug("nf_ct_mptcp_pkt: unexpected state %u, ignoring packet...", new_state);
+			pr_debug("nf_ct_mptcp_pkt: unexpected state, ignoring packet...\n");
 			new_state = old_state;
 			break;
 	case MPTCP_CONNTRACK_MAX:
 			/* invalid packets */
-			pr_debug("nf_ct_tcp: Invalid dir=%i index=%u ostate=%u\n",
+			pr_debug("nf_ct_mptcp_pkt: Invalid dir=%i index=%u ostate=%u\n",
 					dir, get_conntrack_index(th), old_state);
 			if (LOG_INVALID(net, IPPROTO_TCP))
 				nf_log_packet(pf, 0, skb, NULL, NULL, NULL,
-						"nf_ct_tcp: invalid state ");
+						"nf_ct_mptcp_pkt: invalid state ");
 			return -NF_ACCEPT;
 	default:
 			break;

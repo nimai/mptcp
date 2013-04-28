@@ -1210,6 +1210,7 @@ bool tcp_new(struct nf_conn *ct, const struct sk_buff *skb,
 		tcp_options(skb, dataoff, th, &ct->proto.tcp.seen[0]);
 		
 #if defined(CONFIG_NF_CONNTRACK_MPTCP)
+		nf_mptcp_dbgprint_pkt(th);
 		if (!(jptr = (struct mp_join*)nf_mptcp_find_subtype(th, MPTCP_SUB_JOIN))) {
 			pr_debug("conntrack: no mptcp join found in packet, ct=%p\n",ct);
 			goto nomptcp;
