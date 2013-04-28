@@ -411,15 +411,17 @@ static enum mptcp_pkt_type __get_conntrack_index(const struct tcphdr *tcph,
 			return MPTCP_INVALID;
 		case MPTCP_SUB_DSS:
 			mpdss = (struct mp_dss*)*mp;
+			/*infinite map has the priority since it implies no more tracking
+			 * at the mptcp level */
+			if (mpdss->M &&
+					ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0) {
+				/* FIXME : detection of datalen is wrong */
+				pr_debug("nf_mptcp: infinite map detected\n");
+				return MPTCP_INFINITE_MAP;
+			}
 			if (mpdss->F) return MPTCP_DATA_FIN;
 			else if (mpdss->A) return MPTCP_DATA_ACK;
-			else if (mpdss->M) {
-				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0)
-					return MPTCP_INFINITE_MAP;
-				/* FIXME : detection of datalen is wrong */
-				else
-					return MPTCP_DATA_MAP;
-			}
+			else if (mpdss->M) return MPTCP_DATA_MAP;
 			return MPTCP_INVALID;
 		default:
 			break;
@@ -455,17 +457,14 @@ void nf_mptcp_dbgprint_pkt(const struct tcphdr *tcph)
 			return;
 		case MPTCP_SUB_DSS:
 			mpdss = (struct mp_dss*)opt;
-			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits), datalen=%i\n",
+			pr_debug("nf_mptcp DSS: FIN=%u, ACK=%u (%ubits), MAP=%u (%ubits)", 
 					mpdss->F,
 					mpdss->A, mpdss->a?64:32,
-					mpdss->M, mpdss->m?64:32,
-					mpdss->M?ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))):-1); 
-			
-			if (mpdss->M) {
-				if ( ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))) == 0) {
-					pr_debug("nf_mptcp: infinite map detected\n");
-				}
-			}
+					mpdss->M, mpdss->m?64:32);
+			if (mpdss->M) 
+				pr_debug(",	datalen=%i",
+					ntohs((u16)(*((u8*)mpdss + mptcp_sub_len_dss(mpdss, 0)-2))));
+			pr_debug("\n");
 			return;
 		default:
 			pr_debug("nf_ct_mptcp_get_index: no mptcp option detected.\n");
